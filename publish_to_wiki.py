@@ -118,6 +118,17 @@ PREV_PROT_LINE_RE = re.compile(rf"^({PREV_PROT_DATE_PATTERN} by )([^:]+):(.*)$")
 # unrestricted) isn't a boundary and must not be split on.
 PREV_PROT_SPLIT_RE = re.compile(rf" \| (?={PREV_PROT_DATE_PATTERN} by )")
 
+# Matches one non-nested {{...}} template invocation. Protection-log
+# comments/summaries are free text written by many different admins over
+# many years -- if one happens to contain literal template syntax, MediaWiki
+# would try to transclude it when this text lands in published wikitext.
+TEMPLATE_RE = re.compile(r"\{\{[^{}]*\}\}")
+
+
+def escape_templates(text: str) -> str:
+    """Wrap any {{template}} invocations in <nowiki> so publishing never transcludes them."""
+    return TEMPLATE_RE.sub(lambda m: f"<nowiki>{m.group(0)}</nowiki>", text)
+
 
 def wikilink_admin(admin: Optional[str], active: Optional[str] = None) -> str:
     """
@@ -142,7 +153,9 @@ def format_previous_protections(raw: Optional[str]) -> str:
         m = PREV_PROT_LINE_RE.match(item)
         if m:
             prefix, admin, rest = m.groups()
-            item = f"{prefix}{wikilink_admin(admin.strip())}:{rest}"
+            item = f"{prefix}{wikilink_admin(admin.strip())}:{escape_templates(rest)}"
+        else:
+            item = escape_templates(item)
         items.append(item)
     return "<br>\n".join(items)
 
@@ -180,7 +193,7 @@ def row_to_wikitext(row: Dict[str, str]) -> str:
         "protecting_admin": wikilink_admin(
             row.get("protecting_admin", ""), row.get("admin_active")
         ),
-        "edit_summary": row.get("edit_summary", ""),
+        "edit_summary": escape_templates(row.get("edit_summary") or ""),
         "protection_count": row.get("protection_count", ""),
         "previous_protections": format_previous_protections(
             row.get("previous_protections", "")
