@@ -685,10 +685,21 @@ def _fetch_pageviews(title: str, agent: str, start: str, end: str, max_attempts:
     return None
 
 
-def get_pageviews(title: str, days: int = 30, end_lag_days: int = 2, max_attempts: int = 5) -> Optional[int]:
+PAGEVIEWS_CACHE_TTL_DAYS = 3
+
+
+def get_pageviews(
+    title: str, cache: Dict[str, list], days: int = 30, end_lag_days: int = 2, max_attempts: int = 5
+) -> Optional[int]:
     """
     Sum of daily pageviews over a trailing N-day window ending
     `end_lag_days` days before today.
+
+    Reuses a cached result from `cache` (mutated in place) if it's less
+    than PAGEVIEWS_CACHE_TTL_DAYS old -- this number is only ever used as a
+    rough popularity signal for filtering/sorting, not tracked for
+    precision, so a few days of staleness is a fine trade for skipping a
+    live fetch (two REST calls in the worst case) on every run.
 
     Wikimedia's pageviews data for very recent days isn't reliably
     processed yet -- including "today" (or sometimes yesterday) in the
@@ -704,6 +715,16 @@ def get_pageviews(title: str, days: int = 30, end_lag_days: int = 2, max_attempt
     (human + bot/spider) usually does resolve it, so a 404 falls back to
     that once rather than reporting a page as having no data.
     """
+    cached = cache.get(title)
+    if cached is not None:
+        views, checked_at = cached
+        try:
+            fresh = parse_ts(checked_at) >= datetime.now(timezone.utc) - timedelta(days=PAGEVIEWS_CACHE_TTL_DAYS)
+        except ValueError:
+            fresh = False
+        if fresh:
+            return views
+
     end_date = datetime.now(timezone.utc) - timedelta(days=end_lag_days)
     end = end_date.strftime("%Y%m%d")
     # The pageviews API's start/end are both inclusive, so subtracting
@@ -712,12 +733,12 @@ def get_pageviews(title: str, days: int = 30, end_lag_days: int = 2, max_attempt
     start = (end_date - timedelta(days=days - 1)).strftime("%Y%m%d")
 
     result = _fetch_pageviews(title, "user", start, end, max_attempts)
-    if result is not None:
-        return result
-
-    result = _fetch_pageviews(title, "all-agents", start, end, max_attempts)
     if result is None:
-        print(f"  ! pageviews fetch for {title!r} found no data under 'user' or 'all-agents'", file=sys.stderr)
+        result = _fetch_pageviews(title, "all-agents", start, end, max_attempts)
+        if result is None:
+            print(f"  ! pageviews fetch for {title!r} found no data under 'user' or 'all-agents'", file=sys.stderr)
+
+    cache[title] = [result, datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")]
     return result
 
 
@@ -802,6 +823,7 @@ def iter_audit_rows(
     too_young_cache_file: Optional[str] = None,
     admin_cache_file: Optional[str] = None,
     ecp_summary_cache_file: Optional[str] = None,
+    pageviews_cache_file: Optional[str] = None,
     refresh_cache: bool = False,
     skip_titles: Optional[Set[str]] = None,
 ) -> Iterator[Dict[str, Any]]:
@@ -847,6 +869,7 @@ def iter_audit_rows(
     too_young_count = 0
 
     admin_activity_cache = load_json_cache(admin_cache_file, refresh_cache, default={})
+    pageviews_cache = load_json_cache(pageviews_cache_file, refresh_cache, default={})
 
     try:
         for i, entry in enumerate(unique, 1):
@@ -927,7 +950,7 @@ def iter_audit_rows(
                 ecp_summary_cache.add(title)
                 continue
 
-            views = get_pageviews(title)
+            views = get_pageviews(title, pageviews_cache)
             prev = format_previous_protections(original["history"], title)
 
             admin = None if unknown_resolution else original["admin"]
@@ -954,6 +977,7 @@ def iter_audit_rows(
             save_json_cache(too_young_cache_file, too_young_cache)
         save_json_cache(admin_cache_file, admin_activity_cache)
         save_json_cache(ecp_summary_cache_file, sorted(ecp_summary_cache))
+        save_json_cache(pageviews_cache_file, pageviews_cache)
 
     if too_young_count:
         print(f"[info] skipped {too_young_count} pages: not old enough (cutoff {OLD_PROT_CUTOFF.strftime('%m/%d/%Y')})", file=sys.stderr)
@@ -974,7 +998,8 @@ def main() -> None:
         help=(
             f"Ignore any existing {DATA_DIR}/protected_pages_cache.json / {DATA_DIR}/ecp_talk_titles_cache.json / "
             f"{DATA_DIR}/too_young_cache.json / {DATA_DIR}/admin_activity_cache.json / "
-            f"{DATA_DIR}/ecp_summary_cache.json and re-fetch/re-derive all of them from scratch"
+            f"{DATA_DIR}/ecp_summary_cache.json / {DATA_DIR}/pageviews_cache.json and re-fetch/re-derive all of them "
+            "from scratch"
         ),
     )
     args = parser.parse_args()
@@ -1004,6 +1029,7 @@ def main() -> None:
             too_young_cache_file=os.path.join(DATA_DIR, "too_young_cache.json"),
             admin_cache_file=os.path.join(DATA_DIR, "admin_activity_cache.json"),
             ecp_summary_cache_file=os.path.join(DATA_DIR, "ecp_summary_cache.json"),
+            pageviews_cache_file=os.path.join(DATA_DIR, "pageviews_cache.json"),
             refresh_cache=args.refresh_cache,
             skip_titles=done_titles,
         ):
