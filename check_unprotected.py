@@ -9,7 +9,7 @@ unprotected.csv instead.
 
 USAGE
 -----
-    python check_unprotected.py --in data/audit.csv --unprotected-out data/unprotected.csv --contact you@example.com
+    python check_unprotected.py --in data/audit.csv --unprotected-out data/unprotected.csv
 """
 
 import argparse
@@ -26,6 +26,7 @@ from utils import (
     read_csv_rows,
     set_contact,
 )
+from wiki_credentials import CONTACT
 
 
 def atomic_write_csv(path: str, fieldnames: List[str], rows: List[Dict[str, str]]) -> None:
@@ -46,10 +47,9 @@ def main() -> None:
         default=UNPROTECTED_CSV_FILE,
         help="CSV to append no-longer-protected rows to",
     )
-    parser.add_argument("--contact", help="Email or userpage for the User-Agent, per Wikimedia's UA policy")
     args = parser.parse_args()
 
-    set_contact(args.contact)
+    set_contact(CONTACT)
 
     print("Refreshing current indefinite semi/ECP-protected page list...")
     candidates = fetch_protected_list(cache_file=PROTECTED_PAGES_CACHE_FILE, refresh_cache=True)

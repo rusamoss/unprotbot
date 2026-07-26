@@ -26,15 +26,15 @@ racing a full_run that's still in progress.
 
 USAGE
 -----
-    python publish_to_wiki.py --mode check_unprotected --contact you@example.com
-    python publish_to_wiki.py --mode full_run --contact you@example.com
+    python publish_to_wiki.py --mode check_unprotected
+    python publish_to_wiki.py --mode full_run
 
     Generate the page text locally without touching Wikipedia:
-        python publish_to_wiki.py --mode check_unprotected --contact you@example.com --dry-run
+        python publish_to_wiki.py --mode check_unprotected --dry-run
 
     Preview wikitext from an arbitrary CSV, without running --mode's
     pipeline or touching the live protected-pages list at all:
-        python publish_to_wiki.py --mode check_unprotected --contact you@example.com --dry-run --in old_audit.csv
+        python publish_to_wiki.py --mode check_unprotected --dry-run --in old_audit.csv
 """
 
 import argparse
@@ -62,7 +62,7 @@ from utils import (
     request_with_retries,
     set_contact,
 )
-from wiki_credentials import WIKI_BOT_PASSWORD, WIKI_BOT_USERNAME
+from wiki_credentials import CONTACT, WIKI_BOT_PASSWORD, WIKI_BOT_USERNAME
 
 # This script's own directory -- subprocess argv (unlike Python's imports)
 # is resolved relative to the child process's cwd, not this script's
@@ -318,7 +318,7 @@ def run_subprocess(args: List[str]) -> None:
     subprocess.run(args, check=True)
 
 
-def run_check_unprotected(contact: str) -> None:
+def run_check_unprotected() -> None:
     run_subprocess(
         [
             sys.executable,
@@ -327,13 +327,11 @@ def run_check_unprotected(contact: str) -> None:
             AUDIT_CSV,
             "--unprotected-out",
             UNPROTECTED_CSV,
-            "--contact",
-            contact,
         ]
     )
 
 
-def run_full_run(contact: str) -> None:
+def run_full_run() -> None:
     # Write to a temp path and only replace audit.csv on full success -- a
     # crash partway through a multi-hour run must not leave the live file
     # (which the next check_unprotected run reads) truncated.
@@ -344,8 +342,6 @@ def run_full_run(contact: str) -> None:
             os.path.join(SCRIPT_DIR, "unprotbot.py"),
             "--out",
             tmp_out,
-            "--contact",
-            contact,
         ]
     )
     os.replace(tmp_out, AUDIT_CSV)
@@ -451,11 +447,6 @@ def main() -> None:
         "--mode", choices=["check_unprotected", "full_run"], required=True
     )
     parser.add_argument(
-        "--contact",
-        required=True,
-        help="Email or userpage for the User-Agent, per Wikimedia's UA policy",
-    )
-    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Write the generated page text locally instead of publishing to Wikipedia",
@@ -475,7 +466,7 @@ def main() -> None:
     if args.infile and not args.dry_run:
         parser.error("--in is only valid together with --dry-run")
 
-    set_contact(args.contact)
+    set_contact(CONTACT)
 
     if args.infile:
         # Pure CSV -> wikitext preview -- no pipeline run, so no need for
@@ -492,9 +483,9 @@ def main() -> None:
 
     try:
         if args.mode == "check_unprotected":
-            run_check_unprotected(args.contact)
+            run_check_unprotected()
         else:
-            run_full_run(args.contact)
+            run_full_run()
 
         publish_or_preview(AUDIT_CSV, dry_run=args.dry_run)
     finally:

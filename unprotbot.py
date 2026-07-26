@@ -30,13 +30,13 @@ REQUIREMENTS
 
 USAGE
 -----
-    python unprotbot.py --out data/audit.csv --contact you@example.com --limit 200
+    python unprotbot.py --out data/audit.csv --limit 200
 
     Resume an interrupted run (skips titles already in --out, appends to it):
-        python unprotbot.py --out data/audit.csv --contact you@example.com --resume
+        python unprotbot.py --out data/audit.csv --resume
 
     Force a fresh candidate list instead of using the on-disk caches:
-        python unprotbot.py --out data/audit.csv --contact you@example.com --refresh-cache
+        python unprotbot.py --out data/audit.csv --refresh-cache
 
 """
 
@@ -71,6 +71,7 @@ from utils import (
     set_contact,
     retry_after_seconds
 )
+from wiki_credentials import CONTACT
 
 # A single MediaWiki protection-log event, as returned by list=logevents.
 LogEntry = JSONDict
@@ -962,7 +963,6 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", default=AUDIT_CSV_FILE, help="Output CSV path")
     parser.add_argument("--limit", type=int, default=None, help="Limit number of candidate pages (for testing)")
-    parser.add_argument("--contact", help="Email or userpage for the User-Agent, per Wikimedia's UA policy")
     parser.add_argument(
         "--resume",
         action="store_true",
@@ -979,7 +979,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    set_contact(args.contact)
+    set_contact(CONTACT)
 
     done_titles = set()
     file_mode = "w"
