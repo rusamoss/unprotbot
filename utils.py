@@ -26,27 +26,14 @@ JSONDict = Dict[str, Any]
 WIKI_HOST = "https://en.wikipedia.org"
 API_URL = f"{WIKI_HOST}/w/api.php"
 
-SLEEP_BETWEEN_REQUESTS = 0.1
+SLEEP_BETWEEN_REQUESTS = 0.15
 
-# How many years ago is "old enough" to consider a protection for
-# unprotection. Shared between unprotbot.py (which uses it to compute the
-# actual cutoff) and publish_to_wiki.py (which quotes it in published page
-# text) so the two can't silently disagree.
+# How many years ago is "old enough" to consider for unprotection.
 OLD_PROT_CUTOFF_YEARS = 7
 
-# All generated output (audit CSVs, on-disk caches, lockfiles, published-page
-# previews) lives under here instead of the project root. Anchored to this
-# file's own directory (not left as a bare relative path) so it resolves to
-# the same place regardless of the caller's cwd -- these scripts are meant
-# to run from cron/systemd, where cwd isn't guaranteed to be the checkout.
-# Created on import so every script that touches utils.py can rely on it
-# already existing.
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 os.makedirs(DATA_DIR, exist_ok=True)
 
-# Shared by unprotbot.py, check_unprotected.py, and publish_to_wiki.py -- all
-# three read and/or write the same on-disk audit files, so the filenames
-# live in one place rather than as literals duplicated across scripts.
 PROTECTED_PAGES_CACHE_FILE = os.path.join(DATA_DIR, "protected_pages_cache.json")
 AUDIT_CSV_FILE = os.path.join(DATA_DIR, "audit.csv")
 UNPROTECTED_CSV_FILE = os.path.join(DATA_DIR, "unprotected.csv")
@@ -77,7 +64,7 @@ def retry_after_seconds(resp: requests.Response, attempt: int, base: float = 2) 
     try:
         return float(resp.headers.get("Retry-After", ""))
     except ValueError:
-        return min(base * (attempt), 10)
+        return min(base * (attempt), 20)
 
 
 def request_with_retries(send: Callable[[], requests.Response], url: str, max_attempts: int = 5) -> JSONDict:
@@ -86,9 +73,7 @@ def request_with_retries(send: Callable[[], requests.Response], url: str, max_at
     `send` is a zero-arg callable that issues the actual GET/POST (so this
     doesn't care which). Handles HTTP 429 (Retry-After header, or
     exponential backoff if that header is absent) and maxlag the same way
-    for all of them, including the wiki-editing POSTs in publish_to_wiki.py,
-    which otherwise would have been the only unprotected-from-rate-limiting
-    calls in the whole codebase.
+    for all of them.
 
     Raises RuntimeError if every attempt fails (including maxlag exhaustion,
     which isn't an HTTP error and wouldn't otherwise be caught) -- callers
@@ -99,12 +84,6 @@ def request_with_retries(send: Callable[[], requests.Response], url: str, max_at
         try:
             resp = send()
         except requests.exceptions.RequestException as exc:
-            # A connection drop/timeout mid-request (more likely on a large
-            # POST, e.g. publish_to_wiki.py's edit payloads, than on the
-            # small GETs this loop was originally written for) is exactly
-            # as retryable as an HTTP error -- letting it propagate would
-            # crash the whole run on a transient network hiccup instead of
-            # retrying like every other failure mode here does.
             last_error = f"{type(exc).__name__}: {exc}"
             print(
                 f"  ! API request to {url} failed ({last_error}), "

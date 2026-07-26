@@ -537,18 +537,16 @@ def format_previous_protections(history: List[LogEntry], current_title: str) -> 
 
 
 # --------------------------------------------------------------------------
-# Step 3: Extended-confirmed contentious-topic restriction check
+# Step 3: Filter out ECP/recently protected pages
 # --------------------------------------------------------------------------
 
-# Cheap check, run first: the protecting summary itself often names the
+# The protecting summary itself often names the
 # arbitration-enforcement basis for an ECP restriction (e.g.
 # "[[WP:30/500|Arbitration enforcement]]" or a direct WP:ARBPIA3#500/30
 # reference). NOTE: this only recognizes the Israel-Palestine (ARBPIA)
 # citation shorthand plus the generic phrase "Arbitration enforcement" --
 # it is not a general detector for every contentious-topic area's ECP
-# restriction. The category check below (is_ecp_contentious_topic) is the
-# general-purpose safeguard; this is a fast pre-filter for the specific
-# area this bot was built to audit.
+# restriction. This catches some pages not in the category.
 ECP_SUMMARY_RE = re.compile(r"WP:30/500|WP:ARBPIA3#500/30|WP:A/I/PIA|Arbitration enforcement|ARBPIA3", re.I)
 
 
@@ -607,10 +605,6 @@ def is_ecp_contentious_topic(title: str, ecp_talk_titles: Set[str]) -> bool:
     return f"Talk:{title}" in ecp_talk_titles
 
 
-# --------------------------------------------------------------------------
-# Step 3b: Cache of pages found not old enough
-# --------------------------------------------------------------------------
-#
 # Unlike the ECP cache above, this one isn't fetched from Wikipedia -- it's
 # built up by this script itself across runs. A page's resolved protection
 # date (see resolve_original_protection) can only ever get *more recent*
@@ -621,8 +615,6 @@ def is_ecp_contentious_topic(title: str, ecp_talk_titles: Set[str]) -> bool:
 # date, that guarantee no longer holds -- the page might now be old enough,
 # or might have been reprotected more recently since we last checked -- so
 # it falls through to a real recheck rather than being trusted.
-
-
 
 def check_too_young_cache(cache: Dict[str, str], title: str, cutoff: datetime) -> Tuple[bool, bool]:
     """
@@ -644,20 +636,6 @@ def check_too_young_cache(cache: Dict[str, str], title: str, cutoff: datetime) -
         pass
     del cache[title]
     return False, True
-
-
-# --------------------------------------------------------------------------
-# Step 3c: Cache of pages skipped for citing ECP arbitration enforcement
-# --------------------------------------------------------------------------
-#
-# Unlike the too-young cache above, a title only ever needs to land in this
-# cache once: a protection log is append-only, so a summary that once cited
-# ECP arbitration enforcement stays in the page's history forever, and stays
-# true on every future run -- no eviction/recheck logic needed. It's just a
-# growing set of titles, discovered by the per-page summary check further
-# down and merged into the category-based ecp_restricted_titles pre-filter
-# so both checks skip a title at the same point, before any per-page log
-# fetch, instead of only the category one doing so.
 
 
 # --------------------------------------------------------------------------
@@ -848,9 +826,7 @@ def iter_audit_rows(
         unique = unique[:limit]
 
     # Pre-filter the candidate pool against the ECP contentious-topics
-    # category once, up front -- one bulk category fetch instead of a
-    # per-candidate talk-page lookup, and the per-page check below becomes
-    # a plain set membership test with zero further API calls.
+    # category once, up front
     ecp_talk_titles = fetch_ecp_talk_titles(
         cache_file=ct_cache_file,
         refresh_cache=refresh_cache,
@@ -941,12 +917,7 @@ def iter_audit_rows(
                     file=sys.stderr,
                 )
 
-            # Check every summary in this page's protection history, not just
-            # the one chosen as "the" protection date -- an earlier, expired
-            # ECP protection can carry the arbitration-enforcement citation
-            # even if the current indefinite protection's own summary
-            # doesn't. Only reached for pages the category pre-filter above
-            # didn't already catch.
+            # Check every summary in this page's protection history
             all_summaries = ([] if unknown_resolution else [original["summary"]]) + [
                 e.get("comment", "") for e in original["history"]
             ]
