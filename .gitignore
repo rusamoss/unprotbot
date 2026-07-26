@@ -1,0 +1,9 @@
+wiki_credentials.py
+*.lock
+
+# Generated audit output and on-disk caches
+*.csv
+*.json
+audit_wikitable*.txt
+dry_run_*.txt
+__pycache__/
