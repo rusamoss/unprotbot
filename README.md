@@ -1,0 +1,1 @@
+Generates lists for potential candidates to lift indefinite semi- and extended-confirmed protection on the English Wikipedia.
