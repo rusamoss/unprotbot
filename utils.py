@@ -31,6 +31,11 @@ SLEEP_BETWEEN_REQUESTS = 0.15
 # How many years ago is "old enough" to consider for unprotection.
 OLD_PROT_CUTOFF_YEARS = 7
 
+# Shared between unprotbot.py (permanent pre-filter cache -- see
+# too_many_protections_cache) and publish_to_wiki.py (drops these rows from
+# the main "kept" table) so the two thresholds can't drift apart.
+MAX_PROTECTION_COUNT = 4
+
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 os.makedirs(DATA_DIR, exist_ok=True)
 

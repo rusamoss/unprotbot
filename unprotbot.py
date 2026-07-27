@@ -56,6 +56,7 @@ from utils import (
     AUDIT_CSV_FILE,
     DATA_DIR,
     JSONDict,
+    MAX_PROTECTION_COUNT,
     OLD_PROT_CUTOFF_YEARS,
     PROTECTED_PAGES_CACHE_FILE,
     SESSION,
@@ -538,33 +539,21 @@ def format_previous_protections(history: List[LogEntry], current_title: str) -> 
 
 
 # --------------------------------------------------------------------------
-# Step 3: Filter out ECP/recently protected pages
+# Step 3: Filter out ECP/ARBCOM sanctioned/recently protected pages
 # --------------------------------------------------------------------------
-
-# The protecting summary itself often names the
-# arbitration-enforcement basis for an ECP restriction (e.g.
-# "[[WP:30/500|Arbitration enforcement]]" or a direct WP:ARBPIA3#500/30
-# reference). NOTE: this only recognizes the Israel-Palestine (ARBPIA)
-# citation shorthand plus the generic phrase "Arbitration enforcement" --
-# it is not a general detector for every contentious-topic area's ECP
-# restriction. This catches some pages not in the category.
-ECP_SUMMARY_RE = re.compile(r"WP:30/500|WP:ARBPIA3#500/30|WP:A/I/PIA|Arbitration enforcement|ARBPIA3", re.I)
+# The protecting summary often names the
+# arbitration-enforcement basis for an restriction. This will also catch expired sanctions, but let's cast a wide net for now.
+SANCTIONS_SUMMARY = re.compile(r"WP:30/500|WP:ARBPIA3#500/30|WP:A/I/PIA|Arbitration enforcement|ARBPIA3|WP:ARB|sanction|WP:GS", re.I)
 
 
 def is_ecp_by_summary(summary: Optional[str]) -> bool:
     """Does the protecting edit summary cite the ARBPIA arbitration-enforcement basis for ECP?"""
-    return bool(ECP_SUMMARY_RE.search(summary or ""))
+    return bool(SANCTIONS_SUMMARY.search(summary or ""))
 
-
-# Auto-maintained by the {{Contentious topics/talk notice}} template family:
-# a talk page lands here when it carries that notice (without
-# section=yes/relatedcontent=yes/nocat=yes) AND its associated article is
-# extended-confirmed protected.
 PROTECTED_LIST_CACHE_TTL_DAYS = 1
 ECP_CAT_CACHE_TTL_DAYS = 30
 
 ECP_CATEGORY = "Category:Wikipedia pages subject to the extended confirmed restriction"
-
 
 def fetch_ecp_talk_titles(
     cache_file: Optional[str] = None,
@@ -824,6 +813,7 @@ def iter_audit_rows(
     admin_cache_file: Optional[str] = None,
     ecp_summary_cache_file: Optional[str] = None,
     pageviews_cache_file: Optional[str] = None,
+    too_many_protections_cache_file: Optional[str] = None,
     refresh_cache: bool = False,
     skip_titles: Optional[Set[str]] = None,
 ) -> Iterator[Dict[str, Any]]:
@@ -864,6 +854,19 @@ def iter_audit_rows(
         file=sys.stderr,
     )
 
+    # Permanent, self-built cache (title -> protection_count): the count
+    # only ever grows across a page's history, so it's safe to trust
+    # forever once observed. Stores the actual count rather than a baked-in
+    # "too many" verdict, and re-compares against the *current*
+    # MAX_PROTECTION_COUNT on every lookup -- so tuning that threshold takes
+    # effect immediately, in either direction, with no manual cache wipe.
+    too_many_protections_cache = load_json_cache(too_many_protections_cache_file, refresh_cache, default={})
+    print(
+        f"[info] {sum(1 for c in too_many_protections_cache.values() if c > MAX_PROTECTION_COUNT)} candidates "
+        "already known to have too many protection log entries",
+        file=sys.stderr,
+    )
+
     too_young_cache = load_json_cache(too_young_cache_file, refresh_cache, default={})
     too_young_cache_dirty = 0
     too_young_count = 0
@@ -875,6 +878,11 @@ def iter_audit_rows(
         for i, entry in enumerate(unique, 1):
             title = entry["title"]
             if title in skip_titles:
+                continue
+
+            if too_many_protections_cache.get(title, 0) > MAX_PROTECTION_COUNT:
+                # Already known from a previous run -- skip before any
+                # per-page work at all (no log fetch, no printing).
                 continue
 
             if title in ecp_restricted_titles:
@@ -899,6 +907,19 @@ def iter_audit_rows(
 
             if original is None:
                 log_progress(i, len(unique), title, "  -> skipped: no relevant protection log entries found")
+                continue
+
+            if original["protection_count"] > MAX_PROTECTION_COUNT:
+                # protection_count only ever grows -- this is permanent,
+                # unlike the too-young cache below which can un-expire.
+                too_many_protections_cache[title] = original["protection_count"]
+                log_progress(
+                    i,
+                    len(unique),
+                    title,
+                    f"  -> skipped: protection_count {original['protection_count']} exceeds "
+                    f"MAX_PROTECTION_COUNT ({MAX_PROTECTION_COUNT}), will never qualify",
+                )
                 continue
 
             # "unknown" means every protect/modify entry found in the log is
@@ -978,6 +999,7 @@ def iter_audit_rows(
         save_json_cache(admin_cache_file, admin_activity_cache)
         save_json_cache(ecp_summary_cache_file, sorted(ecp_summary_cache))
         save_json_cache(pageviews_cache_file, pageviews_cache)
+        save_json_cache(too_many_protections_cache_file, too_many_protections_cache)
 
     if too_young_count:
         print(f"[info] skipped {too_young_count} pages: not old enough (cutoff {OLD_PROT_CUTOFF.strftime('%m/%d/%Y')})", file=sys.stderr)
@@ -998,8 +1020,8 @@ def main() -> None:
         help=(
             f"Ignore any existing {DATA_DIR}/protected_pages_cache.json / {DATA_DIR}/ecp_talk_titles_cache.json / "
             f"{DATA_DIR}/too_young_cache.json / {DATA_DIR}/admin_activity_cache.json / "
-            f"{DATA_DIR}/ecp_summary_cache.json / {DATA_DIR}/pageviews_cache.json and re-fetch/re-derive all of them "
-            "from scratch"
+            f"{DATA_DIR}/ecp_summary_cache.json / {DATA_DIR}/pageviews_cache.json / "
+            f"{DATA_DIR}/too_many_protections_cache.json and re-fetch/re-derive all of them from scratch"
         ),
     )
     args = parser.parse_args()
@@ -1030,6 +1052,7 @@ def main() -> None:
             admin_cache_file=os.path.join(DATA_DIR, "admin_activity_cache.json"),
             ecp_summary_cache_file=os.path.join(DATA_DIR, "ecp_summary_cache.json"),
             pageviews_cache_file=os.path.join(DATA_DIR, "pageviews_cache.json"),
+            too_many_protections_cache_file=os.path.join(DATA_DIR, "too_many_protections_cache.json"),
             refresh_cache=args.refresh_cache,
             skip_titles=done_titles,
         ):

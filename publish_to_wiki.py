@@ -52,6 +52,7 @@ from utils import (
     AUDIT_CSV_FILE,
     DATA_DIR,
     JSONDict,
+    MAX_PROTECTION_COUNT,
     OLD_PROT_CUTOFF_YEARS,
     PREV_PROT_DATE_PATTERN,
     SESSION,
@@ -87,7 +88,6 @@ EDIT_SUMMARY = "Updating unprotection candidates"
 MAX_PAGEVIEWS = (
     20000  # drop rows with more than this many pageviews/30d from the main table
 )
-MAX_PROTECTION_COUNT = 5
 YEAR_CUTOFF = 10
 
 # Separate table: pages with heavy traffic but only lightly protected --
