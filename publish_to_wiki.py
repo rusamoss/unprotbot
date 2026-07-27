@@ -43,7 +43,7 @@ import os
 import re
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Callable, Dict, List, Optional, Tuple
 from urllib.parse import quote
 
@@ -181,6 +181,22 @@ def compare_threshold(
         return op(int(raw), value)
     except (TypeError, ValueError):
         return False
+
+
+def is_old_enough(protection_date: Optional[str], years: int) -> bool:
+    """
+    True if `protection_date` ("YYYY-MM-DD") is at least `years` years in
+    the past. A blank/unparseable date (e.g. the "unknown" resolution case,
+    where protection_date is left empty) can't be confirmed to meet the
+    bar, so it's excluded rather than assumed to pass.
+    """
+    if not protection_date:
+        return False
+    try:
+        date = datetime.strptime(protection_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return False
+    return date <= datetime.now(timezone.utc) - timedelta(days=365 * years)
 
 
 def row_to_wikitext(row: Dict[str, str]) -> str:
@@ -375,6 +391,7 @@ def build_wikitext(
         and compare_threshold(
             row.get("protection_count"), MAX_PROTECTION_COUNT, operator.le
         )
+        and is_old_enough(row.get("protection_date"), YEAR_CUTOFF)
     ]
     high_pageviews_blocks = [
         block
@@ -392,7 +409,7 @@ def build_wikitext(
     main_text = (
         MAIN_PAGE_INTRO.format(
             date=date_str,
-            years=OLD_PROT_CUTOFF_YEARS,
+            years=YEAR_CUTOFF,
             max_pageviews=MAX_PAGEVIEWS,
             max_prot_count=MAX_PROTECTION_COUNT,
         )
@@ -417,7 +434,8 @@ def build_wikitext(
     dropped = len(all_rows) - len(kept_blocks)
     stats = (
         f"{len(kept_blocks)} kept for {LOW_PAGEVIEWS_PAGE!r} ({dropped} dropped: "
-        f">{MAX_PAGEVIEWS:,} pageviews/30d or >{MAX_PROTECTION_COUNT} times protected); "
+        f">{MAX_PAGEVIEWS:,} pageviews/30d, >{MAX_PROTECTION_COUNT} times protected, "
+        f"or protected less than {YEAR_CUTOFF} years ago); "
         f"{len(high_pageviews_blocks)} kept for {HIGH_PAGEVIEWS_PAGE!r} "
         f"(pageviews > {HIGH_PAGEVIEWS_THRESHOLD:,}/30d and protection count < {LOW_PROTECTION_COUNT_MAX}); "
         f"{len(all_rows)} rows total"

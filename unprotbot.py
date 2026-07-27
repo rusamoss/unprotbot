@@ -591,7 +591,6 @@ def fetch_ecp_talk_titles(
 
 
 def is_ecp_contentious_topic(title: str, ecp_talk_titles: Set[str]) -> bool:
-    """Is this article's talk page in the extended-confirmed-restriction category?"""
     return f"Talk:{title}" in ecp_talk_titles
 
 
