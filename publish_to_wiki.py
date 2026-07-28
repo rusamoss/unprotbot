@@ -239,7 +239,7 @@ MAIN_PAGE_INTRO = (
     "than {max_pageviews:,} page views a month, and no more than {max_prot_count} "
     "entries in the protection log. This ignores redirects and pages which are only "
     "move protected, and filters out pages under [[Wikipedia:ECR|extended-confirmed "
-    "restrictions]] due to general sanctions. These pages are probably good "
+    "restrictions]] due to general sanctions, or where the protection summary mentioned ArbCom sanctions. These pages are probably good "
     "candidates for a [[WP:TRYUNPROT]] trial.\n\n"
     "If unprotecting, make sure to check the protection log manually. The bot-read history can be wonky in cases with page moves, though all major bugs should be cleared up at this point.\n\n"
     f"See also [[{HIGH_PAGEVIEWS_PAGE}]].\n\n"
@@ -251,7 +251,7 @@ HIGH_PAGEVIEWS_PAGE_INTRO = (
     "greater than {threshold:,} page views a month, and no more than "
     "{low_prot_count} entries in the protection log. This ignores redirects and "
     "pages which are only move protected, and filters out pages under "
-    "[[WP:ECR|extended-confirmed restrictions]] due to general sanctions.\n\n"
+    "[[WP:ECR|extended-confirmed restrictions]] due to general sanctions, or where the protection summary mentioned ArbCom sanctions.\n\n"
     "If unprotecting, make sure to check the protection log manually. The bot-read history can be wonky in cases with page moves, though all major bugs should be cleared up at this point.\n\n"
     f"See also [[{LOW_PAGEVIEWS_PAGE}]].\n\n"
 )
@@ -347,7 +347,14 @@ def run_subprocess(args: List[str]) -> None:
     subprocess.run(args, check=True)
 
 
-def run_check_unprotected() -> None:
+def run_check_unprotected() -> bool:
+    """
+    Runs check_unprotected.py and returns whether it actually pruned
+    anything. check_unprotected.py only rewrites audit.csv when something
+    changed (see its own atomic_write_csv call), so comparing its mtime
+    before/after is a free, reliable signal -- no stdout parsing needed.
+    """
+    mtime_before = os.path.getmtime(AUDIT_CSV) if os.path.exists(AUDIT_CSV) else None
     run_subprocess(
         [
             sys.executable,
@@ -358,6 +365,8 @@ def run_check_unprotected() -> None:
             UNPROTECTED_CSV,
         ]
     )
+    mtime_after = os.path.getmtime(AUDIT_CSV) if os.path.exists(AUDIT_CSV) else None
+    return mtime_before != mtime_after
 
 
 def run_full_run() -> None:
@@ -514,11 +523,18 @@ def main() -> None:
 
     try:
         if args.mode == "check_unprotected":
-            run_check_unprotected()
+            changed = run_check_unprotected()
         else:
             run_full_run()
+            changed = True  # a full run always rewrites audit.csv from scratch
 
-        publish_or_preview(AUDIT_CSV, dry_run=args.dry_run)
+        if changed or args.dry_run:
+            publish_or_preview(AUDIT_CSV, dry_run=args.dry_run)
+        else:
+            print(
+                "[info] no pages were unprotected -- nothing to publish, skipping wiki edit",
+                file=sys.stderr,
+            )
     finally:
         release_lock()
 
