@@ -88,7 +88,11 @@ EDIT_SUMMARY = "Updating unprotection candidates"
 MAX_PAGEVIEWS = (
     20000  # drop rows with more than this many pageviews/30d from the main table
 )
-YEAR_CUTOFF = 10
+# Only the main table filters on this -- high-pageviews has no age
+# requirement. Distinctly named from utils.OLD_PROT_CUTOFF_YEARS (both get
+# passed as a "years" kwarg to the two page-intro templates below, which
+# made them easy to swap by accident when this was still called YEAR_CUTOFF).
+MAIN_TABLE_MIN_AGE_YEARS = 10
 
 # Separate table: pages with heavy traffic but only lightly protected --
 # candidates worth a second look since they haven't needed reprotection much
@@ -183,12 +187,12 @@ def compare_threshold(
         return False
 
 
-def is_old_enough(protection_date: Optional[str], years: int) -> bool:
+def is_old_enough(protection_date: Optional[str], cutoff: datetime) -> bool:
     """
-    True if `protection_date` ("YYYY-MM-DD") is at least `years` years in
-    the past. A blank/unparseable date (e.g. the "unknown" resolution case,
-    where protection_date is left empty) can't be confirmed to meet the
-    bar, so it's excluded rather than assumed to pass.
+    True if `protection_date` ("YYYY-MM-DD") is at or before `cutoff`. A
+    blank/unparseable date (e.g. the "unknown" resolution case, where
+    protection_date is left empty) can't be confirmed to meet the bar, so
+    it's excluded rather than assumed to pass.
     """
     if not protection_date:
         return False
@@ -196,7 +200,20 @@ def is_old_enough(protection_date: Optional[str], years: int) -> bool:
         date = datetime.strptime(protection_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
     except ValueError:
         return False
-    return date <= datetime.now(timezone.utc) - timedelta(days=365 * years)
+    return date <= cutoff
+
+
+def row_sort_key(row: Dict[str, str]) -> Tuple[float, str]:
+    """Default table order: fewest protections first, then oldest protection date first."""
+    try:
+        count = int(row.get("protection_count"))
+    except (TypeError, ValueError):
+        count = float("inf")
+    # "YYYY-MM-DD" sorts correctly as a plain string; a blank/unparseable
+    # date (e.g. the "unknown" resolution case) sorts last within its
+    # protection_count group rather than misleadingly first.
+    date = row.get("protection_date") or "9999-99-99"
+    return count, date
 
 
 def row_to_wikitext(row: Dict[str, str]) -> str:
@@ -390,8 +407,12 @@ def build_wikitext(
 ) -> Tuple[str, str, Optional[str], str]:
     """Returns (main_text, high_pageviews_text, all_text, stats_message). all_text is None unless include_all is set."""
     _, all_rows = read_csv_rows(infile)
+    all_rows.sort(key=row_sort_key)
 
     all_blocks = [row_to_wikitext(r) for r in all_rows]
+
+    # Computed once rather than inside is_old_enough per row.
+    min_age_cutoff = datetime.now(timezone.utc) - timedelta(days=365 * MAIN_TABLE_MIN_AGE_YEARS)
 
     kept_blocks = [
         block
@@ -400,7 +421,7 @@ def build_wikitext(
         and compare_threshold(
             row.get("protection_count"), MAX_PROTECTION_COUNT, operator.le
         )
-        and is_old_enough(row.get("protection_date"), YEAR_CUTOFF)
+        and is_old_enough(row.get("protection_date"), min_age_cutoff)
     ]
     high_pageviews_blocks = [
         block
@@ -418,7 +439,7 @@ def build_wikitext(
     main_text = (
         MAIN_PAGE_INTRO.format(
             date=date_str,
-            years=YEAR_CUTOFF,
+            years=MAIN_TABLE_MIN_AGE_YEARS,
             max_pageviews=MAX_PAGEVIEWS,
             max_prot_count=MAX_PROTECTION_COUNT,
         )
@@ -444,7 +465,7 @@ def build_wikitext(
     stats = (
         f"{len(kept_blocks)} kept for {LOW_PAGEVIEWS_PAGE!r} ({dropped} dropped: "
         f">{MAX_PAGEVIEWS:,} pageviews/30d, >{MAX_PROTECTION_COUNT} times protected, "
-        f"or protected less than {YEAR_CUTOFF} years ago); "
+        f"or protected less than {MAIN_TABLE_MIN_AGE_YEARS} years ago); "
         f"{len(high_pageviews_blocks)} kept for {HIGH_PAGEVIEWS_PAGE!r} "
         f"(pageviews > {HIGH_PAGEVIEWS_THRESHOLD:,}/30d and protection count < {LOW_PROTECTION_COUNT_MAX}); "
         f"{len(all_rows)} rows total"

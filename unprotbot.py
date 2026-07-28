@@ -546,12 +546,12 @@ def format_previous_protections(history: List[LogEntry], current_title: str) -> 
 SANCTIONS_SUMMARY = re.compile(r"WP:30/500|WP:ARBPIA3#500/30|WP:A/I/PIA|Arbitration enforcement|ARBPIA3|WP:ARB|sanction|WP:GS", re.I)
 
 
-def is_ecp_by_summary(summary: Optional[str]) -> bool:
-    """Does the protecting edit summary cite the ARBPIA arbitration-enforcement basis for ECP?"""
+def is_sanctioned_by_summary(summary: Optional[str]) -> bool:
+    """Does the protecting edit summary cite an ArbCom sanction/arbitration-enforcement basis (ECP or otherwise)?"""
     return bool(SANCTIONS_SUMMARY.search(summary or ""))
 
 PROTECTED_LIST_CACHE_TTL_DAYS = 1
-ECP_CAT_CACHE_TTL_DAYS = 30
+ECP_CAT_CACHE_TTL_DAYS = 45
 
 ECP_CATEGORY = "Category:Wikipedia pages subject to the extended confirmed restriction"
 
@@ -673,21 +673,41 @@ def _fetch_pageviews(title: str, agent: str, start: str, end: str, max_attempts:
     return None
 
 
-PAGEVIEWS_CACHE_TTL_DAYS = 3
+def ttl_cache_get(cache: Dict[str, list], key: str, ttl_days: float) -> Tuple[bool, Any]:
+    """
+    Used by is_admin_active. Returns (hit, value): hit=False means there's
+    no cached entry, or it's older than ttl_days -- checked as a separate
+    flag rather than testing the value's truthiness, since a legitimately-
+    cached value (e.g. an admin whose activity check came back None) must
+    still count as a hit and not be silently re-fetched forever.
+    """
+    cached = cache.get(key)
+    if cached is None:
+        return False, None
+    value, checked_at = cached
+    try:
+        fresh = parse_ts(checked_at) >= datetime.now(timezone.utc) - timedelta(days=ttl_days)
+    except ValueError:
+        fresh = False
+    return fresh, value
 
 
-def get_pageviews(
-    title: str, cache: Dict[str, list], days: int = 30, end_lag_days: int = 2, max_attempts: int = 5
-) -> Optional[int]:
+def ttl_cache_set(cache: Dict[str, list], key: str, value: Any) -> None:
+    cache[key] = [value, datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")]
+
+
+# A per-title TTL cache (mirroring is_admin_active's) used to live here, but
+# it was pure overhead: it only ever gets read by full_run, which runs
+# weekly with no --resume, so every title is looked up exactly once per run
+# regardless -- there is no same-run repeat lookup for the cache to catch. A
+# TTL under ~7 days can't survive to the next run either, so cached entries
+# were always stale on arrival. If full_run's cadence ever gets shorter (or
+# gains a --resume-style path that revisits titles), this is worth
+# reinstating with ttl_cache_get/ttl_cache_set, same as is_admin_active.
+def get_pageviews(title: str, days: int = 30, end_lag_days: int = 2, max_attempts: int = 5) -> Optional[int]:
     """
     Sum of daily pageviews over a trailing N-day window ending
     `end_lag_days` days before today.
-
-    Reuses a cached result from `cache` (mutated in place) if it's less
-    than PAGEVIEWS_CACHE_TTL_DAYS old -- this number is only ever used as a
-    rough popularity signal for filtering/sorting, not tracked for
-    precision, so a few days of staleness is a fine trade for skipping a
-    live fetch (two REST calls in the worst case) on every run.
 
     Wikimedia's pageviews data for very recent days isn't reliably
     processed yet -- including "today" (or sometimes yesterday) in the
@@ -703,16 +723,6 @@ def get_pageviews(
     (human + bot/spider) usually does resolve it, so a 404 falls back to
     that once rather than reporting a page as having no data.
     """
-    cached = cache.get(title)
-    if cached is not None:
-        views, checked_at = cached
-        try:
-            fresh = parse_ts(checked_at) >= datetime.now(timezone.utc) - timedelta(days=PAGEVIEWS_CACHE_TTL_DAYS)
-        except ValueError:
-            fresh = False
-        if fresh:
-            return views
-
     end_date = datetime.now(timezone.utc) - timedelta(days=end_lag_days)
     end = end_date.strftime("%Y%m%d")
     # The pageviews API's start/end are both inclusive, so subtracting
@@ -726,7 +736,6 @@ def get_pageviews(
         if result is None:
             print(f"  ! pageviews fetch for {title!r} found no data under 'user' or 'all-agents'", file=sys.stderr)
 
-    cache[title] = [result, datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")]
     return result
 
 
@@ -735,7 +744,7 @@ def get_pageviews(
 # --------------------------------------------------------------------------
 
 ADMIN_INACTIVE_AFTER_DAYS = 365 // 2  # 6 months
-ADMIN_ACTIVITY_CACHE_TTL_DAYS = 7
+ADMIN_ACTIVITY_CACHE_TTL_DAYS = 15
 ADMIN_ACTIVE_LABEL = {True: "active", False: "inactive", None: "unknown"}
 
 
@@ -749,18 +758,12 @@ def is_admin_active(admin: str, cache: Dict[str, list]) -> Optional[bool]:
     if not admin or admin in ("(unknown)", "?"):
         return None
 
-    cached = cache.get(admin)
-    if cached is not None:
-        status, checked_at = cached
-        try:
-            fresh = parse_ts(checked_at) >= datetime.now(timezone.utc) - timedelta(days=ADMIN_ACTIVITY_CACHE_TTL_DAYS)
-        except ValueError:
-            fresh = False
-        if fresh:
-            return status
+    hit, status = ttl_cache_get(cache, admin, ADMIN_ACTIVITY_CACHE_TTL_DAYS)
+    if hit:
+        return status
 
     status = _fetch_admin_active(admin)
-    cache[admin] = [status, datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")]
+    ttl_cache_set(cache, admin, status)
     return status
 
 
@@ -810,8 +813,7 @@ def iter_audit_rows(
     ct_cache_file: Optional[str] = None,
     too_young_cache_file: Optional[str] = None,
     admin_cache_file: Optional[str] = None,
-    ecp_summary_cache_file: Optional[str] = None,
-    pageviews_cache_file: Optional[str] = None,
+    sanctions_summary_cache_file: Optional[str] = None,
     too_many_protections_cache_file: Optional[str] = None,
     refresh_cache: bool = False,
     skip_titles: Optional[Set[str]] = None,
@@ -844,12 +846,12 @@ def iter_audit_rows(
         refresh_cache=refresh_cache,
         max_age_seconds=ECP_CAT_CACHE_TTL_DAYS * 86400,
     )
-    ecp_summary_cache = set(load_json_cache(ecp_summary_cache_file, refresh_cache, default=[]))
+    sanctions_summary_cache = set(load_json_cache(sanctions_summary_cache_file, refresh_cache, default=[]))
     ecp_restricted_titles = {c["title"] for c in unique if is_ecp_contentious_topic(c["title"], ecp_talk_titles)}
-    ecp_restricted_titles |= ecp_summary_cache
+    ecp_restricted_titles |= sanctions_summary_cache
     print(
         f"[info] {len(ecp_restricted_titles)} candidates are ECP contentious-topic restricted "
-        "(category or cached protection-summary match)",
+        "(category match, or protection summary citing arbitration enforcement/sanctions)",
         file=sys.stderr,
     )
 
@@ -860,18 +862,13 @@ def iter_audit_rows(
     # MAX_PROTECTION_COUNT on every lookup -- so tuning that threshold takes
     # effect immediately, in either direction, with no manual cache wipe.
     too_many_protections_cache = load_json_cache(too_many_protections_cache_file, refresh_cache, default={})
-    print(
-        f"[info] {sum(1 for c in too_many_protections_cache.values() if c > MAX_PROTECTION_COUNT)} candidates "
-        "already known to have too many protection log entries",
-        file=sys.stderr,
-    )
+    too_many_protections_count = 0
 
     too_young_cache = load_json_cache(too_young_cache_file, refresh_cache, default={})
     too_young_cache_dirty = 0
     too_young_count = 0
 
     admin_activity_cache = load_json_cache(admin_cache_file, refresh_cache, default={})
-    pageviews_cache = load_json_cache(pageviews_cache_file, refresh_cache, default={})
 
     try:
         for i, entry in enumerate(unique, 1):
@@ -882,6 +879,7 @@ def iter_audit_rows(
             if too_many_protections_cache.get(title, 0) > MAX_PROTECTION_COUNT:
                 # Already known from a previous run -- skip before any
                 # per-page work at all (no log fetch, no printing).
+                too_many_protections_count += 1
                 continue
 
             if title in ecp_restricted_titles:
@@ -912,6 +910,7 @@ def iter_audit_rows(
                 # protection_count only ever grows -- this is permanent,
                 # unlike the too-young cache below which can un-expire.
                 too_many_protections_cache[title] = original["protection_count"]
+                too_many_protections_count += 1
                 log_progress(
                     i,
                     len(unique),
@@ -965,12 +964,15 @@ def iter_audit_rows(
             all_summaries = ([] if unknown_resolution else [original["summary"]]) + [
                 e.get("comment", "") for e in original["history"]
             ]
-            if any(is_ecp_by_summary(s) for s in all_summaries):
-                print("  -> skipped: a protection summary in this page's history cites ECP arbitration enforcement", file=sys.stderr)
-                ecp_summary_cache.add(title)
+            if any(is_sanctioned_by_summary(s) for s in all_summaries):
+                print(
+                    "  -> skipped: a protection summary in this page's history cites arbitration enforcement/sanctions",
+                    file=sys.stderr,
+                )
+                sanctions_summary_cache.add(title)
                 continue
 
-            views = get_pageviews(title, pageviews_cache)
+            views = get_pageviews(title)
             prev = format_previous_protections(original["history"], title)
 
             admin = None if unknown_resolution else original["admin"]
@@ -996,12 +998,16 @@ def iter_audit_rows(
         if too_young_cache_dirty:
             save_json_cache(too_young_cache_file, too_young_cache)
         save_json_cache(admin_cache_file, admin_activity_cache)
-        save_json_cache(ecp_summary_cache_file, sorted(ecp_summary_cache))
-        save_json_cache(pageviews_cache_file, pageviews_cache)
+        save_json_cache(sanctions_summary_cache_file, sorted(sanctions_summary_cache))
         save_json_cache(too_many_protections_cache_file, too_many_protections_cache)
 
     if too_young_count:
         print(f"[info] skipped {too_young_count} pages: not old enough (cutoff {OLD_PROT_CUTOFF.strftime('%m/%d/%Y')})", file=sys.stderr)
+    if too_many_protections_count:
+        print(
+            f"[info] skipped {too_many_protections_count} pages: more than {MAX_PROTECTION_COUNT} protection log entries",
+            file=sys.stderr,
+        )
 
 
 def main() -> None:
@@ -1019,8 +1025,8 @@ def main() -> None:
         help=(
             f"Ignore any existing {DATA_DIR}/protected_pages_cache.json / {DATA_DIR}/ecp_talk_titles_cache.json / "
             f"{DATA_DIR}/too_young_cache.json / {DATA_DIR}/admin_activity_cache.json / "
-            f"{DATA_DIR}/ecp_summary_cache.json / {DATA_DIR}/pageviews_cache.json / "
-            f"{DATA_DIR}/too_many_protections_cache.json and re-fetch/re-derive all of them from scratch"
+            f"{DATA_DIR}/ecp_summary_cache.json / {DATA_DIR}/too_many_protections_cache.json and "
+            "re-fetch/re-derive all of them from scratch"
         ),
     )
     args = parser.parse_args()
@@ -1049,8 +1055,7 @@ def main() -> None:
             ct_cache_file=os.path.join(DATA_DIR, "ecp_talk_titles_cache.json"),
             too_young_cache_file=os.path.join(DATA_DIR, "too_young_cache.json"),
             admin_cache_file=os.path.join(DATA_DIR, "admin_activity_cache.json"),
-            ecp_summary_cache_file=os.path.join(DATA_DIR, "ecp_summary_cache.json"),
-            pageviews_cache_file=os.path.join(DATA_DIR, "pageviews_cache.json"),
+            sanctions_summary_cache_file=os.path.join(DATA_DIR, "ecp_summary_cache.json"),
             too_many_protections_cache_file=os.path.join(DATA_DIR, "too_many_protections_cache.json"),
             refresh_cache=args.refresh_cache,
             skip_titles=done_titles,

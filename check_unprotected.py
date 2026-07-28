@@ -72,6 +72,12 @@ def main() -> None:
         # Only rewrite audit.csv when something actually changed -- the
         # common case (nothing pruned) would otherwise be a full rewrite of
         # a multi-MB file, every run, for a no-op.
+        #
+        # publish_to_wiki.py's run_check_unprotected() depends on this being
+        # conditional: it compares this file's mtime before/after calling
+        # this script to detect whether anything was pruned, and skips
+        # publishing (no wiki edit) if not. Making this unconditional would
+        # silently break that -- every run would then look "changed".
         atomic_write_csv(args.infile, fieldnames, still_protected)
 
     print(
