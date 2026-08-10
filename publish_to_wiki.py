@@ -44,7 +44,7 @@ import re
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Set, Tuple
 from urllib.parse import quote
 
 from utils import (
@@ -305,6 +305,26 @@ def get_page_content(title: str, url: str = API_URL) -> Optional[str]:
     return None
 
 
+CHECKED_CANDIDATES_PAGE = "User:Rusalkii/Checked candidates for unprotection"
+
+# One bulleted item is "* [[Title]]", optionally followed by more text on
+# the same line (a note, a second wikilink, a signature) that's ignored --
+# only the first wikilink's target counts, matching that page's own stated
+# format ("Must be formatted as a bulleted item immediately followed by a
+# link to the page; it will ignore all text on each line after the first
+# wikilink"). [^\]|] stops at "|" too, so a piped display-text link like
+# "[[Title|note]]" still resolves to the real target.
+EXCLUDED_BULLET_RE = re.compile(r"^\*+\s*\[\[([^\]|]+)", re.MULTILINE)
+
+
+def fetch_excluded_titles() -> Set[str]:
+    """Titles manually marked "checked" on CHECKED_CANDIDATES_PAGE -- excluded from both published tables."""
+    content = get_page_content(CHECKED_CANDIDATES_PAGE)
+    if content is None:
+        return set()
+    return set(EXCLUDED_BULLET_RE.findall(content))
+
+
 def wiki_login(username: str, password: str, url: str = API_URL) -> None:
     """
     Log SESSION into the wiki using a bot password from
@@ -440,6 +460,8 @@ def build_wikitext(
     _, all_rows = read_csv_rows(infile)
     all_rows.sort(key=row_sort_key)
 
+    excluded_titles = fetch_excluded_titles()
+
     all_blocks = [row_to_wikitext(r) for r in all_rows]
 
     # Computed once rather than inside is_old_enough per row.
@@ -448,7 +470,8 @@ def build_wikitext(
     kept_blocks = [
         block
         for row, block in zip(all_rows, all_blocks)
-        if compare_threshold(row.get("pageviews_last_30d"), MAX_PAGEVIEWS, operator.le)
+        if row.get("title") not in excluded_titles
+        and compare_threshold(row.get("pageviews_last_30d"), MAX_PAGEVIEWS, operator.le)
         and compare_threshold(
             row.get("protection_count"), MAX_PROTECTION_COUNT, operator.le
         )
@@ -457,7 +480,8 @@ def build_wikitext(
     high_pageviews_blocks = [
         block
         for row, block in zip(all_rows, all_blocks)
-        if compare_threshold(
+        if row.get("title") not in excluded_titles
+        and compare_threshold(
             row.get("pageviews_last_30d"), HIGH_PAGEVIEWS_THRESHOLD, operator.gt
         )
         and compare_threshold(
@@ -496,9 +520,10 @@ def build_wikitext(
     stats = (
         f"{len(kept_blocks)} kept for {LOW_PAGEVIEWS_PAGE!r} ({dropped} dropped: "
         f">{MAX_PAGEVIEWS:,} pageviews/30d, >{MAX_PROTECTION_COUNT} times protected, "
-        f"or protected less than {MAIN_TABLE_MIN_AGE_YEARS} years ago); "
+        f"protected less than {MAIN_TABLE_MIN_AGE_YEARS} years ago, or manually excluded); "
         f"{len(high_pageviews_blocks)} kept for {HIGH_PAGEVIEWS_PAGE!r} "
         f"(pageviews > {HIGH_PAGEVIEWS_THRESHOLD:,}/30d and protection count < {LOW_PROTECTION_COUNT_MAX}); "
+        f"{len(excluded_titles)} titles excluded via {CHECKED_CANDIDATES_PAGE!r}; "
         f"{len(all_rows)} rows total"
     )
     return main_text, high_pageviews_text, all_text, stats
