@@ -134,16 +134,20 @@ def escape_templates(text: str) -> str:
     return TEMPLATE_RE.sub(lambda m: f"<nowiki>{m.group(0)}</nowiki>", text)
 
 
-def wikilink_admin(admin: Optional[str], active: Optional[str] = None) -> str:
+def wikilink_admin(admin: Optional[str], active: Optional[str] = None, is_sysop: Optional[str] = None) -> str:
     """
     [[User:Name]], or the raw text unchanged if there's no real username to
-    link. If `active` is the string "inactive", appends " (inactive)".
+    link. Appends " (inactive)" if `active` is "inactive", and " (-admin)"
+    if `is_sysop` is "no" (confirmed no longer an administrator) -- both
+    can apply at once.
     """
     if not admin or admin in ("(unknown)", "?"):
         return admin or ""
     link = f"[[User:{admin}]]"
     if active == "inactive":
         link += " (inactive)"
+    if is_sysop == "no":
+        link += " (-admin)"
     return link
 
 
@@ -224,7 +228,7 @@ def row_to_wikitext(row: Dict[str, str]) -> str:
         "title": f"[[{title}]]",
         "protection_date": f"[{log_url} {protection_date}]",
         "protecting_admin": wikilink_admin(
-            row.get("protecting_admin", ""), row.get("admin_active")
+            row.get("protecting_admin", ""), row.get("admin_active"), row.get("admin_is_sysop")
         ),
         "edit_summary": escape_templates(row.get("edit_summary") or ""),
         "protection_count": row.get("protection_count", ""),
@@ -272,6 +276,33 @@ HIGH_PAGEVIEWS_PAGE_INTRO = (
     "If unprotecting, make sure to check the protection log manually. The bot-read history can be wonky in cases with page moves, though all major bugs should be cleared up at this point.\n\n"
     f"See also [[{LOW_PAGEVIEWS_PAGE}]].\n\n"
 )
+
+
+# Matches the "as of the July 25, 2026 bot run" stamp embedded in both
+# page intros -- stripped out before comparing generated text against the
+# live page, so a run that would only bump this date (nothing else in
+# either table actually changed) is correctly recognized as a no-op rather
+# than triggering a content-free edit.
+BOT_RUN_DATE_RE = re.compile(r"as of the \w+ \d{1,2}, \d{4} bot run")
+
+
+def normalize_for_diff(text: str) -> str:
+    return BOT_RUN_DATE_RE.sub("as of the [DATE] bot run", text)
+
+
+def get_page_content(title: str, url: str = API_URL) -> Optional[str]:
+    """Current live wikitext of `title`, or None if the page doesn't exist."""
+    data = api_get(
+        {"action": "query", "titles": title, "prop": "revisions", "rvprop": "content", "rvslots": "main"},
+        url=url,
+    )
+    for page in data.get("query", {}).get("pages", {}).values():
+        if "missing" in page:
+            return None
+        revisions = page.get("revisions", [])
+        if revisions:
+            return revisions[0].get("slots", {}).get("main", {}).get("*", "")
+    return None
 
 
 def wiki_login(username: str, password: str, url: str = API_URL) -> None:
@@ -494,12 +525,18 @@ def publish_or_preview(infile: str, dry_run: bool) -> None:
     else:
         wiki_login(WIKI_BOT_USERNAME, WIKI_BOT_PASSWORD)
         token = get_csrf_token()
-        edit_page(LOW_PAGEVIEWS_PAGE, main_text, EDIT_SUMMARY, token)
-        edit_page(HIGH_PAGEVIEWS_PAGE, high_pageviews_text, EDIT_SUMMARY, token)
-        print(
-            f"[info] published to {LOW_PAGEVIEWS_PAGE!r} and {HIGH_PAGEVIEWS_PAGE!r}",
-            file=sys.stderr,
-        )
+        for page_title, text in [(LOW_PAGEVIEWS_PAGE, main_text), (HIGH_PAGEVIEWS_PAGE, high_pageviews_text)]:
+            current = get_page_content(page_title)
+            # Compared with the date stamp stripped out -- the mode-level
+            # "did check_unprotected prune anything" check upstream isn't
+            # enough on its own, since a pruned row might not have been in
+            # THIS page's table anyway, leaving this page's real content
+            # unchanged even though something changed elsewhere.
+            if current is not None and normalize_for_diff(current) == normalize_for_diff(text):
+                print(f"[info] {page_title!r} unchanged except the date stamp -- skipping edit", file=sys.stderr)
+                continue
+            edit_page(page_title, text, EDIT_SUMMARY, token)
+            print(f"[info] published to {page_title!r}", file=sys.stderr)
 
 
 def main() -> None:

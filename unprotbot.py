@@ -99,6 +99,7 @@ FIELDNAMES: List[str] = [
     "protection_type",
     "resolved_via",
     "admin_active",
+    "admin_is_sysop",
 ]
 
 
@@ -796,6 +797,49 @@ def _fetch_admin_active(admin: str) -> Optional[bool]:
     return last_edit >= datetime.now(timezone.utc) - timedelta(days=ADMIN_INACTIVE_AFTER_DAYS)
 
 
+# Re-adminship after a desysop is rare but does happen, so this is cached
+# for a long time rather than forever.
+ADMIN_SYSOP_CACHE_TTL_DAYS = 365
+ADMIN_SYSOP_LABEL = {True: "yes", False: "no", None: "unknown"}
+
+
+def is_still_admin(admin: str, cache: Dict[str, list]) -> Optional[bool]:
+    """
+    Does `admin` currently hold the sysop right? (They necessarily held it
+    at the time of the protection being audited -- protecting is an
+    admin-only action -- so this is asking whether that still holds today.)
+
+    Reuses a cached result from `cache` (mutated in place) if it's less
+    than ADMIN_SYSOP_CACHE_TTL_DAYS old.
+    """
+    if not admin or admin in ("(unknown)", "?"):
+        return None
+
+    hit, status = ttl_cache_get(cache, admin, ADMIN_SYSOP_CACHE_TTL_DAYS)
+    if hit:
+        return status
+
+    status = _fetch_is_still_admin(admin)
+    ttl_cache_set(cache, admin, status)
+    return status
+
+
+def _fetch_is_still_admin(admin: str) -> Optional[bool]:
+    """Live group-membership lookup backing is_still_admin -- not cached itself."""
+    try:
+        data = api_get({"action": "query", "list": "users", "ususers": admin, "usprop": "groups"})
+    except Exception as exc:  # noqa: BLE001
+        print(f"  ! error checking admin status for {admin!r}: {exc}", file=sys.stderr)
+        return None
+
+    users = data.get("query", {}).get("users", [])
+    if not users or "missing" in users[0]:
+        # Can't find this exact username -- most likely a rename, not
+        # necessarily a desysop -- so this is unknown, not a confident "no".
+        return None
+    return "sysop" in users[0].get("groups", [])
+
+
 # --------------------------------------------------------------------------
 # Main pipeline
 # --------------------------------------------------------------------------
@@ -813,6 +857,7 @@ def iter_audit_rows(
     ct_cache_file: Optional[str] = None,
     too_young_cache_file: Optional[str] = None,
     admin_cache_file: Optional[str] = None,
+    admin_sysop_cache_file: Optional[str] = None,
     sanctions_summary_cache_file: Optional[str] = None,
     too_many_protections_cache_file: Optional[str] = None,
     refresh_cache: bool = False,
@@ -869,6 +914,7 @@ def iter_audit_rows(
     too_young_count = 0
 
     admin_activity_cache = load_json_cache(admin_cache_file, refresh_cache, default={})
+    admin_sysop_cache = load_json_cache(admin_sysop_cache_file, refresh_cache, default={})
 
     try:
         for i, entry in enumerate(unique, 1):
@@ -988,6 +1034,7 @@ def iter_audit_rows(
                 "protection_type": entry["level"] or "unknown",
                 "resolved_via": original["resolved_via"],
                 "admin_active": ADMIN_ACTIVE_LABEL[is_admin_active(admin, admin_activity_cache)],
+                "admin_is_sysop": ADMIN_SYSOP_LABEL[is_still_admin(admin, admin_sysop_cache)],
             }
     finally:
         # Runs on normal completion AND on early abandonment (the caller
@@ -998,6 +1045,7 @@ def iter_audit_rows(
         if too_young_cache_dirty:
             save_json_cache(too_young_cache_file, too_young_cache)
         save_json_cache(admin_cache_file, admin_activity_cache)
+        save_json_cache(admin_sysop_cache_file, admin_sysop_cache)
         save_json_cache(sanctions_summary_cache_file, sorted(sanctions_summary_cache))
         save_json_cache(too_many_protections_cache_file, too_many_protections_cache)
 
@@ -1025,8 +1073,8 @@ def main() -> None:
         help=(
             f"Ignore any existing {DATA_DIR}/protected_pages_cache.json / {DATA_DIR}/ecp_talk_titles_cache.json / "
             f"{DATA_DIR}/too_young_cache.json / {DATA_DIR}/admin_activity_cache.json / "
-            f"{DATA_DIR}/ecp_summary_cache.json / {DATA_DIR}/too_many_protections_cache.json and "
-            "re-fetch/re-derive all of them from scratch"
+            f"{DATA_DIR}/admin_sysop_cache.json / {DATA_DIR}/ecp_summary_cache.json / "
+            f"{DATA_DIR}/too_many_protections_cache.json and re-fetch/re-derive all of them from scratch"
         ),
     )
     args = parser.parse_args()
@@ -1055,6 +1103,7 @@ def main() -> None:
             ct_cache_file=os.path.join(DATA_DIR, "ecp_talk_titles_cache.json"),
             too_young_cache_file=os.path.join(DATA_DIR, "too_young_cache.json"),
             admin_cache_file=os.path.join(DATA_DIR, "admin_activity_cache.json"),
+            admin_sysop_cache_file=os.path.join(DATA_DIR, "admin_sysop_cache.json"),
             sanctions_summary_cache_file=os.path.join(DATA_DIR, "ecp_summary_cache.json"),
             too_many_protections_cache_file=os.path.join(DATA_DIR, "too_many_protections_cache.json"),
             refresh_cache=args.refresh_cache,
