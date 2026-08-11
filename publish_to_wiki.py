@@ -44,12 +44,13 @@ import re
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
-from typing import Callable, Dict, List, Optional, Set, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 from urllib.parse import quote
 
 from utils import (
     API_URL,
     AUDIT_CSV_FILE,
+    CHECKED_CANDIDATES_PAGE,
     DATA_DIR,
     JSONDict,
     MAX_PROTECTION_COUNT,
@@ -59,6 +60,8 @@ from utils import (
     UNPROTECTED_CSV_FILE,
     WIKI_HOST,
     api_get,
+    fetch_excluded_titles,
+    get_page_content,
     read_csv_rows,
     request_with_retries,
     set_contact,
@@ -290,39 +293,6 @@ def normalize_for_diff(text: str) -> str:
     return BOT_RUN_DATE_RE.sub("as of the [DATE] bot run", text)
 
 
-def get_page_content(title: str, url: str = API_URL) -> Optional[str]:
-    """Current live wikitext of `title`, or None if the page doesn't exist."""
-    data = api_get(
-        {"action": "query", "titles": title, "prop": "revisions", "rvprop": "content", "rvslots": "main"},
-        url=url,
-    )
-    for page in data.get("query", {}).get("pages", {}).values():
-        if "missing" in page:
-            return None
-        revisions = page.get("revisions", [])
-        if revisions:
-            return revisions[0].get("slots", {}).get("main", {}).get("*", "")
-    return None
-
-
-CHECKED_CANDIDATES_PAGE = "User:Rusalkii/Checked candidates for unprotection"
-
-# One bulleted item is "* [[Title]]", optionally followed by more text on
-# the same line (a note, a second wikilink, a signature) that's ignored --
-# only the first wikilink's target counts, matching that page's own stated
-# format ("Must be formatted as a bulleted item immediately followed by a
-# link to the page; it will ignore all text on each line after the first
-# wikilink"). [^\]|] stops at "|" too, so a piped display-text link like
-# "[[Title|note]]" still resolves to the real target.
-EXCLUDED_BULLET_RE = re.compile(r"^\*+\s*\[\[([^\]|]+)", re.MULTILINE)
-
-
-def fetch_excluded_titles() -> Set[str]:
-    """Titles manually marked "checked" on CHECKED_CANDIDATES_PAGE -- excluded from both published tables."""
-    content = get_page_content(CHECKED_CANDIDATES_PAGE)
-    if content is None:
-        return set()
-    return set(EXCLUDED_BULLET_RE.findall(content))
 
 
 def wiki_login(username: str, password: str, url: str = API_URL) -> None:

@@ -63,6 +63,7 @@ from utils import (
     SLEEP_BETWEEN_REQUESTS,
     api_get,
     check_csv_schema,
+    fetch_excluded_titles,
     fetch_protected_list,
     format_prev_prot_entry,
     load_json_cache,
@@ -900,6 +901,12 @@ def iter_audit_rows(
         file=sys.stderr,
     )
 
+    # Manually "checked" pages -- fetched fresh each run (a single
+    # lightweight page fetch, not worth caching) and filtered out before
+    # any per-page audit work, same as the other pre-filters above.
+    excluded_titles = fetch_excluded_titles()
+    print(f"[info] {len(excluded_titles)} candidates manually excluded via checked-candidates page", file=sys.stderr)
+
     # Permanent, self-built cache (title -> protection_count): the count
     # only ever grows across a page's history, so it's safe to trust
     # forever once observed. Stores the actual count rather than a baked-in
@@ -920,6 +927,12 @@ def iter_audit_rows(
         for i, entry in enumerate(unique, 1):
             title = entry["title"]
             if title in skip_titles:
+                continue
+
+            if title in excluded_titles:
+                # Already known from the checked-candidates page -- skip
+                # before any per-page work at all (no log fetch, no
+                # printing).
                 continue
 
             if too_many_protections_cache.get(title, 0) > MAX_PROTECTION_COUNT:
