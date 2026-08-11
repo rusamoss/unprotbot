@@ -91,10 +91,7 @@ EDIT_SUMMARY = "Updating unprotection candidates"
 MAX_PAGEVIEWS = (
     20000  # drop rows with more than this many pageviews/30d from the main table
 )
-# Only the main table filters on this -- high-pageviews has no age
-# requirement. Distinctly named from utils.OLD_PROT_CUTOFF_YEARS (both get
-# passed as a "years" kwarg to the two page-intro templates below, which
-# made them easy to swap by accident when this was still called YEAR_CUTOFF).
+# Only the main table filters on this -- high-pageviews has no age requirement.
 MAIN_TABLE_MIN_AGE_YEARS = 10
 
 # Separate table: pages with heavy traffic but only lightly protected --
@@ -265,6 +262,7 @@ MAIN_PAGE_INTRO = (
     "move protected, and filters out pages under [[Wikipedia:ECR|extended-confirmed "
     "restrictions]] due to general sanctions, or where the protection summary mentioned ArbCom sanctions. These pages are probably good "
     "candidates for a [[WP:TRYUNPROT]] trial.\n\n"
+    "To remove pages from this list, add them to [[User:Rusalkii/Checked candidates for unprotection]]\n\n"
     "If unprotecting, make sure to check the protection log manually. The bot-read history can be wonky in cases with page moves, though all major bugs should be cleared up at this point.\n\n"
     f"See also [[{HIGH_PAGEVIEWS_PAGE}]].\n\n"
 )
@@ -276,6 +274,7 @@ HIGH_PAGEVIEWS_PAGE_INTRO = (
     "{low_prot_count} entries in the protection log. This ignores redirects and "
     "pages which are only move protected, and filters out pages under "
     "[[WP:ECR|extended-confirmed restrictions]] due to general sanctions, or where the protection summary mentioned ArbCom sanctions.\n\n"
+    "To remove pages from this list, add them to [[User:Rusalkii/Checked candidates for unprotection]]\n\n"
     "If unprotecting, make sure to check the protection log manually. The bot-read history can be wonky in cases with page moves, though all major bugs should be cleared up at this point.\n\n"
     f"See also [[{LOW_PAGEVIEWS_PAGE}]].\n\n"
 )
@@ -291,8 +290,6 @@ BOT_RUN_DATE_RE = re.compile(r"as of the \w+ \d{1,2}, \d{4} bot run")
 
 def normalize_for_diff(text: str) -> str:
     return BOT_RUN_DATE_RE.sub("as of the [DATE] bot run", text)
-
-
 
 
 def wiki_login(username: str, password: str, url: str = API_URL) -> None:

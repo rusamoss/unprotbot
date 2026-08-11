@@ -176,7 +176,7 @@ def find_edit_detail(details: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
 def touches_edit_protection(entry: LogEntry) -> bool:
     """
     Returns True if this log entry represents a change to *edit*
-    protection, as opposed tojust move-protection.
+    protection, as opposed to just move-protection.
     """
     action = entry.get("action", "")
     if action == "move_prot":
