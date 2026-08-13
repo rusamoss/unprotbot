@@ -382,14 +382,7 @@ def run_subprocess(args: List[str]) -> None:
     subprocess.run(args, check=True)
 
 
-def run_check_unprotected() -> bool:
-    """
-    Runs check_unprotected.py and returns whether it actually pruned
-    anything. check_unprotected.py only rewrites audit.csv when something
-    changed (see its own atomic_write_csv call), so comparing its mtime
-    before/after is a free, reliable signal -- no stdout parsing needed.
-    """
-    mtime_before = os.path.getmtime(AUDIT_CSV) if os.path.exists(AUDIT_CSV) else None
+def run_check_unprotected() -> None:
     run_subprocess(
         [
             sys.executable,
@@ -400,8 +393,6 @@ def run_check_unprotected() -> bool:
             UNPROTECTED_CSV,
         ]
     )
-    mtime_after = os.path.getmtime(AUDIT_CSV) if os.path.exists(AUDIT_CSV) else None
-    return mtime_before != mtime_after
 
 
 def run_full_run() -> None:
@@ -573,18 +564,18 @@ def main() -> None:
 
     try:
         if args.mode == "check_unprotected":
-            changed = run_check_unprotected()
+            run_check_unprotected()
         else:
             run_full_run()
-            changed = True  # a full run always rewrites audit.csv from scratch
 
-        if changed or args.dry_run:
-            publish_or_preview(AUDIT_CSV, dry_run=args.dry_run)
-        else:
-            print(
-                "[info] no pages were unprotected -- nothing to publish, skipping wiki edit",
-                file=sys.stderr,
-            )
+        # Always generate and (attempt to) publish -- even a run that
+        # pruned zero rows can still need a real edit, e.g. a page newly
+        # added to the checked-candidates exclusion list since the last
+        # publish. publish_or_preview's own per-page content diff (against
+        # the live page, date stamp ignored) is what actually decides
+        # whether each page needs an edit, so nothing is wasted when
+        # genuinely nothing changed.
+        publish_or_preview(AUDIT_CSV, dry_run=args.dry_run)
     finally:
         release_lock()
 
