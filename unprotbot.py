@@ -4,8 +4,11 @@ unprotbot.py
 
 Audits indefinitely semi-protected / extended-confirmed-protected articles
 (namespace 0, non-redirects) on en.wikipedia.org, and for every page whose
-*original* protection was placed more than X years ago and which is NOT under
-an extended-confirmed contentious-topic (CT)restriction , produces a table with:
+*original* protection was placed more than OLD_PROT_CUTOFF_YEARS years ago,
+isn't extended-confirmed-contentious-topic-restricted (by category or by a
+sanctions-referencing summary), has at most MAX_PROTECTION_COUNT protection
+log entries, and isn't manually excluded via the checked-candidates page,
+writes one CSV row with:
 
   - date of (original) protection
   - protecting admin
@@ -19,10 +22,10 @@ Handles page moves: MediaWiki's protection log records an entry like
 "moved protection settings from [[Old Title]] to [[New Title]]" (action
 'move_prot') when protection is carried over during a page move. This
 script walks backward through such entries to find where the protection
-was *originally* applied, falling back to the move-log timestamp if the
-original page/log entry can no longer be resolved. Log entries that only
-touch move-protection (not edit-protection) are ignored, per the "ignore
-changes to just move protection" instruction.
+was *originally* applied, leaving protection_date blank (resolved_via=
+"unknown") when no confirmed protection entry can be found at all. Log
+entries that only touch move-protection (not edit-protection) are ignored,
+per the "ignore changes to just move protection" instruction.
 
 REQUIREMENTS
 ------------
@@ -66,12 +69,14 @@ from utils import (
     fetch_excluded_titles,
     fetch_protected_list,
     format_prev_prot_entry,
+    is_unresolved_admin,
     load_json_cache,
     mw_paginated,
     read_csv_rows,
     save_json_cache,
     set_contact,
-    retry_after_seconds
+    retry_after_seconds,
+    years_ago_cutoff,
 )
 from wiki_credentials import CONTACT
 
@@ -87,7 +92,7 @@ PAGEVIEWS_URL = (
     "en.wikipedia/all-access/{agent}/{title}/daily/{start}/{end}"
 )
 
-OLD_PROT_CUTOFF = datetime.now(timezone.utc) - timedelta(days=365 * OLD_PROT_CUTOFF_YEARS)
+OLD_PROT_CUTOFF = years_ago_cutoff(OLD_PROT_CUTOFF_YEARS)
 
 FIELDNAMES: List[str] = [
     "title",
@@ -110,8 +115,10 @@ FIELDNAMES: List[str] = [
 
 # Heuristic fallback (only used for old log entries without structured
 # params.details): does the description mention edit-protection, or is it
-# purely about move-protection?
-EDIT_PROT_RE = re.compile(r"\[edit=", re.I)
+# purely about move-protection? Shared by every regex below that looks for
+# this tag in a free-text description.
+EDIT_TAG = r"\[edit="
+EDIT_PROT_RE = re.compile(EDIT_TAG, re.I)
 MOVE_TAG_RE = re.compile(r"\[move=", re.I)
 
 # Before the 'move_prot' action existed as a distinct log action type,
@@ -252,8 +259,8 @@ def parse_expiry_value(expiry_str: Optional[str]) -> Any:
         return UNKNOWN
 
 
-EXPIRES_DESC_RE = re.compile(r"\[edit=[^\]]*\]\s*\(expires ([0-9]{1,2}:[0-9]{2}, [0-9]{1,2} \w+ [0-9]{4}) \(UTC\)\)", re.I)
-INDEFINITE_DESC_RE = re.compile(r"\[edit=[^\]]*\]\s*\(indefinite\)", re.I)
+EXPIRES_DESC_RE = re.compile(EDIT_TAG + r"[^\]]*\]\s*\(expires ([0-9]{1,2}:[0-9]{2}, [0-9]{1,2} \w+ [0-9]{4}) \(UTC\)\)", re.I)
+INDEFINITE_DESC_RE = re.compile(EDIT_TAG + r"[^\]]*\]\s*\(indefinite\)", re.I)
 
 
 def edit_expiry(entry: LogEntry) -> Any:
@@ -282,7 +289,7 @@ def edit_expiry(entry: LogEntry) -> Any:
     return UNKNOWN
 
 
-EDIT_BRACKET_RE = re.compile(r"\[edit=([^\]]*)\]\s*(\([^)]*\))?", re.I)
+EDIT_BRACKET_RE = re.compile(EDIT_TAG + r"([^\]]*)\]\s*(\([^)]*\))?", re.I)
 
 
 def edit_protection_signature(entry: LogEntry) -> Any:
@@ -350,7 +357,10 @@ def entries_with_new_edit_protection(history: List[LogEntry]) -> List[LogEntry]:
 
 
 def build_full_history(
-    title: str, _seen: Optional[Set[str]] = None, _before: Optional[str] = None
+    title: str,
+    _seen: Optional[Set[str]] = None,
+    _before: Optional[str] = None,
+    _log_cache: Optional[Dict[str, List[LogEntry]]] = None,
 ) -> List[LogEntry]:
     """
     Recursively walk move_prot entries to build the complete, flattened
@@ -373,8 +383,16 @@ def build_full_history(
     # capitalizations several times) legitimately revisits that title twice,
     # each time for a disjoint time window, and both visits must go through.
     _seen = _seen | {title}
+    # Unlike _seen, this dict IS shared/mutated across the whole call tree
+    # (same object passed down, not copied) -- sibling move_prot branches
+    # that converge on the same ancestor title reuse its log instead of
+    # re-fetching it.
+    if _log_cache is None:
+        _log_cache = {}
 
-    log = get_protection_log(title)
+    if title not in _log_cache:
+        _log_cache[title] = get_protection_log(title)
+    log = _log_cache[title]
     relevant = [e for e in log if touches_edit_protection(e)]
     if _before is not None:
         # Only entries from strictly before the move belong to the page
@@ -402,7 +420,7 @@ def build_full_history(
                 # this was meant to guard against, and nothing here can
                 # reliably tell the two apart (pageid differs in both
                 # cases), so no pruning is attempted at all.
-                ancestor_history = build_full_history(old_title, _seen, e.get("timestamp", ""))
+                ancestor_history = build_full_history(old_title, _seen, e.get("timestamp", ""), _log_cache)
                 out.extend(ancestor_history)
         out.append(e)
 
@@ -543,9 +561,9 @@ def format_previous_protections(history: List[LogEntry], current_title: str) -> 
 # --------------------------------------------------------------------------
 # Step 3: Filter out ECP/ARBCOM sanctioned/recently protected pages
 # --------------------------------------------------------------------------
-# The protecting summary often names the
-# arbitration-enforcement basis for an restriction. This will also catch expired sanctions, but let's cast a wide net for now.
-SANCTIONS_SUMMARY = re.compile(r"WP:30/500|WP:ARBPIA3#500/30|WP:A/I/PIA|Arbitration enforcement|ARBPIA3|WP:ARB|sanction|WP:GS", re.I)
+# Matches when a protecting summary cites an arbitration-enforcement/sanctions
+# basis. Also catches expired sanctions -- intentionally broad.
+SANCTIONS_SUMMARY = re.compile(r"WP:30/500|WP:A/I/PIA|Arbitration enforcement|ARBPIA3|WP:ARB|sanction|WP:GS", re.I)
 
 
 def is_sanctioned_by_summary(summary: Optional[str]) -> bool:
@@ -666,12 +684,16 @@ def _fetch_pageviews(title: str, agent: str, start: str, end: str, max_attempts:
             items = resp.json().get("items", [])
             return sum(item.get("views", 0) for item in items)
         except (requests.RequestException, ValueError) as exc:
-            print(f"  ! pageviews fetch for {title!r} ({agent}) failed: {exc}", file=sys.stderr)
-            return None
+            print(
+                f"  ! pageviews fetch for {title!r} ({agent}) failed: {exc}, "
+                f"retrying (attempt {attempt + 1}/{max_attempts})",
+                file=sys.stderr,
+            )
+            continue
         finally:
             time.sleep(SLEEP_BETWEEN_REQUESTS)
 
-    print(f"  ! pageviews fetch for {title!r} ({agent}) still rate-limited after {max_attempts} attempts, giving up", file=sys.stderr)
+    print(f"  ! pageviews fetch for {title!r} ({agent}) still failing after {max_attempts} attempts, giving up", file=sys.stderr)
     return None
 
 
@@ -698,14 +720,10 @@ def ttl_cache_set(cache: Dict[str, list], key: str, value: Any) -> None:
     cache[key] = [value, datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")]
 
 
-# A per-title TTL cache (mirroring is_admin_active's) used to live here, but
-# it was pure overhead: it only ever gets read by full_run, which runs
-# weekly with no --resume, so every title is looked up exactly once per run
-# regardless -- there is no same-run repeat lookup for the cache to catch. A
-# TTL under ~7 days can't survive to the next run either, so cached entries
-# were always stale on arrival. If full_run's cadence ever gets shorter (or
-# gains a --resume-style path that revisits titles), this is worth
-# reinstating with ttl_cache_get/ttl_cache_set, same as is_admin_active.
+# A pageviews TTL cache (like is_admin_active's) was removed: full_run visits
+# each title once per run and a <7-day TTL can't survive to the next weekly
+# run anyway. Reinstate with ttl_cache_get/set if the cadence shortens or
+# gains a --resume-style repeat path.
 def get_pageviews(title: str, days: int = 30, end_lag_days: int = 2, max_attempts: int = 5) -> Optional[int]:
     """
     Sum of daily pageviews over a trailing N-day window ending
@@ -757,7 +775,7 @@ def is_admin_active(admin: str, cache: Dict[str, list]) -> Optional[bool]:
     Reuses a cached result from `cache` (mutated in place) if it's less than
     ADMIN_ACTIVITY_CACHE_TTL_DAYS old.
     """
-    if not admin or admin in ("(unknown)", "?"):
+    if is_unresolved_admin(admin):
         return None
 
     hit, status = ttl_cache_get(cache, admin, ADMIN_ACTIVITY_CACHE_TTL_DAYS)
@@ -813,25 +831,29 @@ def is_still_admin(admin: str, cache: Dict[str, list]) -> Optional[bool]:
     Reuses a cached result from `cache` (mutated in place) if it's less
     than ADMIN_SYSOP_CACHE_TTL_DAYS old.
     """
-    if not admin or admin in ("(unknown)", "?"):
+    if is_unresolved_admin(admin):
         return None
 
     hit, status = ttl_cache_get(cache, admin, ADMIN_SYSOP_CACHE_TTL_DAYS)
     if hit:
         return status
 
-    status = _fetch_is_still_admin(admin)
+    try:
+        status = _fetch_is_still_admin(admin)
+    except Exception as exc:  # noqa: BLE001
+        # A real API failure, not a resolvable "user not found" -- don't
+        # cache it, so the next run retries instead of trusting "unknown"
+        # for a full year.
+        print(f"  ! error checking admin status for {admin!r}: {exc}", file=sys.stderr)
+        return None
+
     ttl_cache_set(cache, admin, status)
     return status
 
 
 def _fetch_is_still_admin(admin: str) -> Optional[bool]:
     """Live group-membership lookup backing is_still_admin -- not cached itself."""
-    try:
-        data = api_get({"action": "query", "list": "users", "ususers": admin, "usprop": "groups"})
-    except Exception as exc:  # noqa: BLE001
-        print(f"  ! error checking admin status for {admin!r}: {exc}", file=sys.stderr)
-        return None
+    data = api_get({"action": "query", "list": "users", "ususers": admin, "usprop": "groups"})
 
     users = data.get("query", {}).get("users", [])
     if not users or "missing" in users[0]:
@@ -929,21 +951,19 @@ def iter_audit_rows(
             if title in skip_titles:
                 continue
 
+            # Ordered cheapest-first; each of these skips before any log
+            # fetch or per-title printing.
             if title in excluded_titles:
-                # Already known from the checked-candidates page -- skip
-                # before any per-page work at all (no log fetch, no
-                # printing).
+                # From the checked-candidates page.
                 continue
 
             if too_many_protections_cache.get(title, 0) > MAX_PROTECTION_COUNT:
-                # Already known from a previous run -- skip before any
-                # per-page work at all (no log fetch, no printing).
+                # From a previous run.
                 too_many_protections_count += 1
                 continue
 
             if title in ecp_restricted_titles:
-                # Already known from the category pre-filter -- skip before
-                # doing any per-page work at all (no log fetch, no printing).
+                # From the category pre-filter.
                 continue
 
             still_valid, evicted = check_too_young_cache(too_young_cache, title, OLD_PROT_CUTOFF)

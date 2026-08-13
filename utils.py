@@ -18,6 +18,7 @@ import os
 import re
 import sys
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import requests
@@ -65,12 +66,29 @@ def format_prev_prot_entry(date: str, admin: str, comment: str) -> str:
     return f"{date} by {admin}: {comment}"
 
 
+# Placeholder admin values written when no real username is known:
+# "(unknown)" (resolve_original_protection, an unresolvable log trace) and
+# "?" (format_previous_protections, e.get("user", "?") on a malformed entry).
+# Checked in unprotbot.py (is_admin_active, is_still_admin) and
+# publish_to_wiki.py (wikilink_admin) before treating a value as a real
+# username.
+UNRESOLVED_ADMIN_VALUES = ("(unknown)", "?")
+
+
+def is_unresolved_admin(admin: Optional[str]) -> bool:
+    return not admin or admin in UNRESOLVED_ADMIN_VALUES
+
+
+def years_ago_cutoff(years: float) -> datetime:
+    return datetime.now(timezone.utc) - timedelta(days=365 * years)
+
+
 def retry_after_seconds(resp: requests.Response, attempt: int, base: float = 2) -> float:
     """Seconds to wait before retrying a 429: the Retry-After header if present, else exponential backoff."""
     try:
         return float(resp.headers.get("Retry-After", ""))
     except ValueError:
-        return min(base * (attempt), 20)
+        return min(base * (attempt + 1), 20)
 
 
 def request_with_retries(send: Callable[[], requests.Response], url: str, max_attempts: int = 5) -> JSONDict:
@@ -193,6 +211,12 @@ def read_csv_rows(path: str) -> Tuple[Optional[List[str]], List[Dict[str, str]]]
         return reader.fieldnames, list(reader)
 
 
+def count_csv_rows(path: str) -> int:
+    """Row count excluding the header, without building a dict per row like read_csv_rows does."""
+    with open(path, newline="", encoding="utf-8") as f:
+        return max(sum(1 for _ in csv.reader(f)) - 1, 0)
+
+
 def mw_paginated(
     base_params: JSONDict,
     continue_key: str,
@@ -296,9 +320,11 @@ CHECKED_CANDIDATES_PAGE = "User:Rusalkii/Checked candidates for unprotection"
 # only the first wikilink's target counts, matching that page's own stated
 # format ("Must be formatted as a bulleted item immediately followed by a
 # link to the page; it will ignore all text on each line after the first
-# wikilink"). [^\]|] stops at "|" too, so a piped display-text link like
-# "[[Title|note]]" still resolves to the real target.
-EXCLUDED_BULLET_RE = re.compile(r"^\*+\s*\[\[([^\]|]+)", re.MULTILINE)
+# wikilink"). [^\]|#] stops at "|" too, so a piped display-text link like
+# "[[Title|note]]" still resolves to the real target, and at "#" so a
+# section link like "[[Title#Section]]" resolves to the plain title that
+# audit.csv/publish_to_wiki.py actually compare against.
+EXCLUDED_BULLET_RE = re.compile(r"^\*+\s*\[\[([^\]|#]+)", re.MULTILINE)
 
 
 def fetch_excluded_titles() -> Set[str]:

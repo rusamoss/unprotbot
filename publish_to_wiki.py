@@ -60,11 +60,14 @@ from utils import (
     UNPROTECTED_CSV_FILE,
     WIKI_HOST,
     api_get,
+    count_csv_rows,
     fetch_excluded_titles,
     get_page_content,
+    is_unresolved_admin,
     read_csv_rows,
     request_with_retries,
     set_contact,
+    years_ago_cutoff,
 )
 from wiki_credentials import CONTACT, WIKI_BOT_PASSWORD, WIKI_BOT_USERNAME
 
@@ -91,7 +94,8 @@ EDIT_SUMMARY = "Updating unprotection candidates"
 MAX_PAGEVIEWS = (
     20000  # drop rows with more than this many pageviews/30d from the main table
 )
-# Only the main table filters on this -- high-pageviews has no age requirement.
+# Only the main table uses this threshold -- high-pageviews enforces its own,
+# lower age floor (OLD_PROT_CUTOFF_YEARS) further down in build_wikitext.
 MAIN_TABLE_MIN_AGE_YEARS = 10
 
 # Separate table: pages with heavy traffic but only lightly protected --
@@ -141,7 +145,7 @@ def wikilink_admin(admin: Optional[str], active: Optional[str] = None, is_sysop:
     if `is_sysop` is "no" (confirmed no longer an administrator) -- both
     can apply at once.
     """
-    if not admin or admin in ("(unknown)", "?"):
+    if is_unresolved_admin(admin):
         return admin or ""
     link = f"[[User:{admin}]]"
     if active == "inactive":
@@ -408,6 +412,23 @@ def run_full_run() -> None:
             tmp_out,
         ]
     )
+
+    # unprotbot.py can exit 0 while having silently skipped nearly every
+    # title (e.g. a Wikipedia API outage partway through the run causes
+    # every per-title resolve_original_protection call to error and be
+    # skipped) -- a plain exit-code check wouldn't catch that, so compare
+    # row counts before trusting the new file enough to publish it live.
+    new_count = count_csv_rows(tmp_out)
+    if os.path.exists(AUDIT_CSV):
+        old_count = count_csv_rows(AUDIT_CSV)
+        if old_count and new_count < old_count / 2:
+            raise RuntimeError(
+                f"{tmp_out} has {new_count} rows, less than half of {AUDIT_CSV}'s "
+                f"{old_count} -- looks like a run that failed partway through rather "
+                f"than a real drop in candidates. Refusing to overwrite {AUDIT_CSV}; "
+                f"inspect {tmp_out} manually."
+            )
+
     os.replace(tmp_out, AUDIT_CSV)
 
 
@@ -423,13 +444,21 @@ def build_wikitext(
     all_blocks = [row_to_wikitext(r) for r in all_rows]
 
     # Computed once rather than inside is_old_enough per row.
-    min_age_cutoff = datetime.now(timezone.utc) - timedelta(days=365 * MAIN_TABLE_MIN_AGE_YEARS)
+    min_age_cutoff = years_ago_cutoff(MAIN_TABLE_MIN_AGE_YEARS)
+    # HIGH_PAGEVIEWS_PAGE_INTRO claims every listed page was protected more
+    # than OLD_PROT_CUTOFF_YEARS years ago -- enforce that here too, so a
+    # row with an unresolved/blank protection_date (unprotbot.py's "unknown
+    # resolution" case, which skips the age check upstream) can't slip in.
+    high_pageviews_min_age_cutoff = years_ago_cutoff(OLD_PROT_CUTOFF_YEARS)
 
     kept_blocks = [
         block
         for row, block in zip(all_rows, all_blocks)
         if row.get("title") not in excluded_titles
         and compare_threshold(row.get("pageviews_last_30d"), MAX_PAGEVIEWS, operator.le)
+        # unprotbot.py already never writes a row exceeding this -- re-checked
+        # here too as a safety net against a stale audit.csv written before
+        # MAX_PROTECTION_COUNT was last changed.
         and compare_threshold(
             row.get("protection_count"), MAX_PROTECTION_COUNT, operator.le
         )
@@ -445,6 +474,7 @@ def build_wikitext(
         and compare_threshold(
             row.get("protection_count"), LOW_PROTECTION_COUNT_MAX, operator.lt
         )
+        and is_old_enough(row.get("protection_date"), high_pageviews_min_age_cutoff)
     ]
 
     date_str = format_bot_run_date(datetime.now(timezone.utc))
@@ -469,9 +499,8 @@ def build_wikitext(
         + assemble_table(high_pageviews_blocks)
         + "\n"
     )
-    # Only assembled when actually needed -- on a real (non-dry-run)
-    # publish, nothing ever reads all_text, so building it would be a
-    # wasted full render of every row on every hourly/weekly run.
+    # all_blocks is already built above for the other two tables; skip
+    # wrapping it into all_text unless include_all (dry-run) needs it.
     all_text = assemble_table(all_blocks) + "\n" if include_all else None
 
     dropped = len(all_rows) - len(kept_blocks)
@@ -506,18 +535,21 @@ def publish_or_preview(infile: str, dry_run: bool) -> None:
             file=sys.stderr,
         )
     else:
-        wiki_login(WIKI_BOT_USERNAME, WIKI_BOT_PASSWORD)
-        token = get_csrf_token()
+        # Login/token acquired lazily, only once an edit turns out to be
+        # needed -- the common hourly case is both pages unchanged, and
+        # that shouldn't cost a login + token round trip.
+        token = None
         for page_title, text in [(LOW_PAGEVIEWS_PAGE, main_text), (HIGH_PAGEVIEWS_PAGE, high_pageviews_text)]:
             current = get_page_content(page_title)
-            # Compared with the date stamp stripped out -- the mode-level
-            # "did check_unprotected prune anything" check upstream isn't
-            # enough on its own, since a pruned row might not have been in
-            # THIS page's table anyway, leaving this page's real content
-            # unchanged even though something changed elsewhere.
+            # Diffed with the date stamp stripped out -- pruning is decided
+            # at the run level, but only per-page content can say whether
+            # *this* page's table actually changed.
             if current is not None and normalize_for_diff(current) == normalize_for_diff(text):
                 print(f"[info] {page_title!r} unchanged except the date stamp -- skipping edit", file=sys.stderr)
                 continue
+            if token is None:
+                wiki_login(WIKI_BOT_USERNAME, WIKI_BOT_PASSWORD)
+                token = get_csrf_token()
             edit_page(page_title, text, EDIT_SUMMARY, token)
             print(f"[info] published to {page_title!r}", file=sys.stderr)
 
