@@ -15,13 +15,13 @@ USAGE
 import argparse
 import csv
 import os
-from typing import Dict, List
+import sys
+from typing import Dict, List, Optional
 
 from utils import (
     AUDIT_CSV_FILE,
     PROTECTED_PAGES_CACHE_FILE,
     UNPROTECTED_CSV_FILE,
-    check_csv_schema,
     fetch_protected_list,
     read_csv_rows,
     set_contact,
@@ -36,6 +36,15 @@ def atomic_write_csv(path: str, fieldnames: List[str], rows: List[Dict[str, str]
         writer.writeheader()
         writer.writerows(rows)
     os.replace(tmp_path, path)
+
+
+def has_matching_schema(path: str, expected_fieldnames: List[str]) -> Optional[bool]:
+    """None if `path` doesn't exist/is empty (needs a header written), else whether its header matches."""
+    if not os.path.exists(path) or os.path.getsize(path) == 0:
+        return None
+    with open(path, newline="", encoding="utf-8") as f:
+        existing = csv.DictReader(f).fieldnames
+    return existing is not None and list(existing) == expected_fieldnames
 
 
 def main() -> None:
@@ -64,12 +73,26 @@ def main() -> None:
     unprotected = [row for row in rows if row["title"] not in still_protected_titles]
 
     if unprotected:
-        write_header = check_csv_schema(args.unprotected_out, fieldnames, parser, "--unprotected-out") is None
-        with open(args.unprotected_out, "a", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            if write_header:
-                writer.writeheader()
-            writer.writerows(unprotected)
+        # A schema mismatch here must not block pruning audit.csv below --
+        # unprotected.csv is just an append-only audit trail, far less
+        # important than audit.csv actually staying in sync with Wikipedia.
+        # Warn and skip the append instead of aborting the whole run (which
+        # previously left every already-unprotected page stuck on the
+        # published tables until someone noticed and renamed the old file).
+        matches = has_matching_schema(args.unprotected_out, fieldnames)
+        if matches is False:
+            print(
+                f"[warn] --unprotected-out: {args.unprotected_out}'s columns don't match the "
+                f"current schema {fieldnames} -- skipping the append. Rename/move the old file "
+                "to get a fresh one with the current schema.",
+                file=sys.stderr,
+            )
+        else:
+            with open(args.unprotected_out, "a", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                if matches is None:
+                    writer.writeheader()
+                writer.writerows(unprotected)
 
         # Only rewrite audit.csv when something actually changed -- the
         # common case (nothing pruned) would otherwise be a full rewrite of

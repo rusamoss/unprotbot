@@ -69,6 +69,7 @@ from utils import (
     fetch_excluded_titles,
     fetch_protected_list,
     format_prev_prot_entry,
+    is_still_indefinitely_protected,
     is_unresolved_admin,
     load_json_cache,
     mw_paginated,
@@ -974,6 +975,19 @@ def iter_audit_rows(
                 # A stale entry was just evicted -- recheck for real, in case
                 # the page was reprotected more recently since we last looked.
                 too_young_cache_dirty += 1
+
+            # fetch_protected_list's candidate list can be up to a day stale
+            # (see PROTECTED_LIST_CACHE_TTL_DAYS) -- a page unprotected after
+            # that cache was built, but before this run reaches it, would
+            # otherwise still get a fresh row written for it here. One cheap
+            # live check closes that window before the expensive log trace.
+            try:
+                if not is_still_indefinitely_protected(title):
+                    log_progress(i, len(unique), title, "  -> skipped: no longer indefinitely protected")
+                    continue
+            except Exception as exc:  # noqa: BLE001
+                log_progress(i, len(unique), title, f"  ! error re-checking protection status: {exc}")
+                continue
 
             try:
                 original = resolve_original_protection(title)

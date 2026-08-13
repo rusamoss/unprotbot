@@ -298,6 +298,27 @@ def fetch_protected_list(
     return results
 
 
+def is_still_indefinitely_protected(title: str, url: str = API_URL) -> bool:
+    """
+    Uncached, live check: does `title` right now have indefinite semi or
+    extended-confirmed edit protection? Unlike fetch_protected_list (whose
+    candidate list can be up to a day stale, per its own cache_file/
+    max_age_seconds), this hits the API fresh every call -- meant for
+    re-verifying a single title immediately before trusting it, not for
+    bulk candidate discovery.
+    """
+    data = api_get({"action": "query", "titles": title, "prop": "info", "inprop": "protection"}, url=url)
+    for page in data.get("query", {}).get("pages", {}).values():
+        for prot in page.get("protection", []):
+            if (
+                prot.get("type") == "edit"
+                and prot.get("level") in ("autoconfirmed", "extendedconfirmed")
+                and prot.get("expiry") == "infinity"
+            ):
+                return True
+    return False
+
+
 def get_page_content(title: str, url: str = API_URL) -> Optional[str]:
     """Current live wikitext of `title`, or None if the page doesn't exist."""
     data = api_get(
