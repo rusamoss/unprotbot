@@ -45,6 +45,14 @@ PROTECTED_PAGES_CACHE_FILE = os.path.join(DATA_DIR, "protected_pages_cache.json"
 AUDIT_CSV_FILE = os.path.join(DATA_DIR, "audit.csv")
 UNPROTECTED_CSV_FILE = os.path.join(DATA_DIR, "unprotected.csv")
 
+# Matches the filenames the crontab's own `>> data/hourly.log 2>&1` /
+# `>> data/weekly.log 2>&1` redirection uses -- these constants exist so
+# publish_to_wiki.py can trim them (see trim_log_file), not because
+# anything here writes to them directly (that's just inherited stdout/
+# stderr from the shell redirection, outside Python's control).
+HOURLY_LOG_FILE = os.path.join(DATA_DIR, "hourly.log")
+WEEKLY_LOG_FILE = os.path.join(DATA_DIR, "weekly.log")
+
 # The exact date pattern used at the start of one "previous protections"
 # history line, e.g. "2019-05-17 by JBW: ...". unprotbot.py's
 # format_previous_protections is the only writer (via format_prev_prot_entry
@@ -215,6 +223,25 @@ def count_csv_rows(path: str) -> int:
     """Row count excluding the header, without building a dict per row like read_csv_rows does."""
     with open(path, newline="", encoding="utf-8") as f:
         return max(sum(1 for _ in csv.reader(f)) - 1, 0)
+
+
+def trim_log_file(path: str, max_lines: int = 5000) -> None:
+    """
+    Keeps only the last `max_lines` lines of `path`, if it's grown past
+    that. Meant to be called at the very start of a cron-invoked script's
+    main(), before it prints anything itself: the script's own stdout/
+    stderr is a separate, already-open append-mode fd from the crontab's
+    `>> path 2>&1` redirection, so truncating `path` here doesn't disturb
+    that -- append mode always seeks to end-of-file before each write.
+    """
+    if not os.path.exists(path):
+        return
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        lines = f.readlines()
+    if len(lines) <= max_lines:
+        return
+    with open(path, "w", encoding="utf-8") as f:
+        f.writelines(lines[-max_lines:])
 
 
 def mw_paginated(

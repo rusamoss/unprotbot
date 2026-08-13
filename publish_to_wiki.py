@@ -52,12 +52,14 @@ from utils import (
     AUDIT_CSV_FILE,
     CHECKED_CANDIDATES_PAGE,
     DATA_DIR,
+    HOURLY_LOG_FILE,
     JSONDict,
     MAX_PROTECTION_COUNT,
     OLD_PROT_CUTOFF_YEARS,
     PREV_PROT_DATE_PATTERN,
     SESSION,
     UNPROTECTED_CSV_FILE,
+    WEEKLY_LOG_FILE,
     WIKI_HOST,
     api_get,
     count_csv_rows,
@@ -67,6 +69,7 @@ from utils import (
     read_csv_rows,
     request_with_retries,
     set_contact,
+    trim_log_file,
     years_ago_cutoff,
 )
 from wiki_credentials import CONTACT, WIKI_BOT_PASSWORD, WIKI_BOT_USERNAME
@@ -593,6 +596,11 @@ def main() -> None:
             file=sys.stderr,
         )
         return
+
+    # The crontab redirects this process's own stdout/stderr to
+    # hourly.log/weekly.log (`>> data/*.log 2>&1`) -- trimming here, before
+    # anything else prints, keeps that file from growing forever.
+    trim_log_file(HOURLY_LOG_FILE if args.mode == "check_unprotected" else WEEKLY_LOG_FILE)
 
     try:
         if args.mode == "check_unprotected":

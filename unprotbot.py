@@ -869,7 +869,21 @@ def _fetch_is_still_admin(admin: str) -> Optional[bool]:
 # --------------------------------------------------------------------------
 
 
+LOG_PROGRESS_INTERVAL = 250
+
+
 def log_progress(i: int, total: int, title: str, reason: Optional[str] = None) -> None:
+    """
+    Errors (reason starting with "!", after the leading whitespace/arrow)
+    always print immediately. Everything else -- the routine per-title
+    heartbeat and ordinary skip reasons -- only prints every
+    LOG_PROGRESS_INTERVAL-th title, plus the very last one, so a weekly
+    full_run over tens of thousands of candidates doesn't write a line (or
+    two) to weekly.log per title.
+    """
+    is_error = bool(reason) and reason.strip().startswith("!")
+    if not (is_error or i % LOG_PROGRESS_INTERVAL == 0 or i == total):
+        return
     print(f"[{i}/{total}] {title}", file=sys.stderr)
     if reason:
         print(reason, file=sys.stderr)
