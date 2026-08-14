@@ -296,7 +296,14 @@ BOT_RUN_DATE_RE = re.compile(r"as of the \w+ \d{1,2}, \d{4} bot run")
 
 
 def normalize_for_diff(text: str) -> str:
-    return BOT_RUN_DATE_RE.sub("as of the [DATE] bot run", text)
+    # rstrip() matters as much as the date substitution: MediaWiki strips
+    # trailing whitespace/newlines from wikitext on save, but build_wikitext
+    # always appends a trailing "\n" to what it generates -- without this,
+    # the freshly generated text and the live-fetched content (which never
+    # has that trailing newline) would never compare equal, even when
+    # nothing else differs. This was confirmed live: get_page_content() on
+    # both published pages never returns a trailing newline.
+    return BOT_RUN_DATE_RE.sub("as of the [DATE] bot run", text).rstrip()
 
 
 def wiki_login(username: str, password: str, url: str = API_URL) -> None:
