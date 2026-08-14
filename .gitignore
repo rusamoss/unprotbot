@@ -4,6 +4,7 @@ wiki_credentials.py
 # Generated audit output and on-disk caches
 *.csv
 *.json
+*.log
 audit_wikitable*.txt
 dry_run_*.txt
 __pycache__/
